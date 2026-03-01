@@ -1,0 +1,221 @@
+use std::net::{Ipv4Addr, SocketAddrV4};
+use std::time::Duration;
+use anyhow::Result;
+use tokio::net::UdpSocket;
+use tracing::debug;
+
+pub struct UdpProbe {
+    pub name: String,
+    pub payload: Vec<u8>,
+    pub ports: Vec<u16>,
+}
+
+pub fn get_default_probes() -> Vec<UdpProbe> {
+    vec![
+        UdpProbe {
+            name: "DNSStatusRequest".to_string(),
+            payload: vec![
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x07, 0x76, 0x65, 0x72,
+                0x73, 0x69, 0x6f, 0x6e, 0x04, 0x62, 0x69, 0x6e,
+                0x64, 0x00, 0x00, 0x10, 0x00, 0x03,
+            ],
+            ports: vec![53],
+        },
+        UdpProbe {
+            name: "NTPRequest".to_string(),
+            payload: vec![
+                0x1b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ],
+            ports: vec![123],
+        },
+        UdpProbe {
+            name: "SNMPv1public".to_string(),
+            payload: vec![
+                0x30, 0x26, 0x02, 0x01, 0x00, 0x04, 0x06, 0x70,
+                0x75, 0x62, 0x6c, 0x69, 0x63, 0xa0, 0x19, 0x02,
+                0x01, 0x01, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00,
+                0x30, 0x0e, 0x30, 0x0c, 0x06, 0x08, 0x2b, 0x06,
+                0x01, 0x02, 0x01, 0x01, 0x01, 0x00, 0x05, 0x00,
+            ],
+            ports: vec![161],
+        },
+        UdpProbe {
+            name: "NBTStat".to_string(),
+            payload: vec![
+                0x80, 0xf0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x20, 0x43, 0x4b, 0x41,
+                0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,
+                0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,
+                0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,
+                0x41, 0x41, 0x41, 0x41, 0x41, 0x00, 0x00, 0x21,
+                0x00, 0x01,
+            ],
+            ports: vec![137],
+        },
+        UdpProbe {
+            name: "DHCPInform".to_string(),
+            payload: vec![
+                0x01, 0x01, 0x06, 0x00, 0x00, 0x00, 0x00, 0x01,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ],
+            ports: vec![67, 68],
+        },
+        UdpProbe {
+            name: "TFTP".to_string(),
+            payload: vec![
+                0x00, 0x01, 0x6e, 0x65, 0x74, 0x61, 0x73, 0x63,
+                0x69, 0x69, 0x00, 0x6f, 0x63, 0x74, 0x65, 0x74,
+                0x00,
+            ],
+            ports: vec![69],
+        },
+        UdpProbe {
+            name: "SSDP".to_string(),
+            payload: b"M-SEARCH * HTTP/1.1\r\nHost:239.255.255.250:1900\r\nST:ssdp:all\r\nMan:\"ssdp:discover\"\r\nMX:3\r\n\r\n".to_vec(),
+            ports: vec![1900],
+        },
+        UdpProbe {
+            name: "ms-sql-s".to_string(),
+            payload: vec![0x02],
+            ports: vec![1434],
+        },
+        UdpProbe {
+            name: "Citrix".to_string(),
+            payload: vec![
+                0x1e, 0x00, 0x01, 0x30, 0x02, 0xfd, 0xa8, 0xe3,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ],
+            ports: vec![1604],
+        },
+        UdpProbe {
+            name: "memcached".to_string(),
+            payload: b"stats\r\n".to_vec(),
+            ports: vec![11211],
+        },
+        UdpProbe {
+            name: "QUIC".to_string(),
+            payload: vec![
+                0x0d, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ],
+            ports: vec![443, 80],
+        },
+        UdpProbe {
+            name: "RPCCheck".to_string(),
+            payload: vec![
+                0x72, 0xfe, 0x1d, 0x13, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0x86, 0xa0,
+                0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03,
+            ],
+            ports: vec![111],
+        },
+        UdpProbe {
+            name: "Chargen".to_string(),
+            payload: vec![0x01],
+            ports: vec![19],
+        },
+        UdpProbe {
+            name: "Echo".to_string(),
+            payload: b"Echo\r\n".to_vec(),
+            ports: vec![7],
+        },
+        UdpProbe {
+            name: "SIPOptions".to_string(),
+            payload: b"OPTIONS sip:nm SIP/2.0\r\nVia: SIP/2.0/UDP nm;branch=foo\r\nFrom: <sip:nm@nm>;tag=root\r\nTo: <sip:nm2@nm2>\r\nCall-ID: 50000\r\nCSeq: 42 OPTIONS\r\nMax-Forwards: 70\r\nContent-Length: 0\r\nContact: <sip:nm@nm>\r\nAccept: application/sdp\r\n\r\n".to_vec(),
+            ports: vec![5060, 5061],
+        },
+        UdpProbe {
+            name: "RADIUS".to_string(),
+            payload: vec![
+                0x01, 0x00, 0x00, 0x26, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x01, 0x06, 0x6e, 0x6d,
+                0x61, 0x70,
+            ],
+            ports: vec![1812, 1813],
+        },
+        UdpProbe {
+            name: "DNSServiceDiscovery".to_string(),
+            payload: vec![
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x09, 0x5f, 0x73, 0x65,
+                0x72, 0x76, 0x69, 0x63, 0x65, 0x73, 0x07, 0x5f,
+                0x64, 0x6e, 0x73, 0x2d, 0x73, 0x64, 0x04, 0x5f,
+                0x75, 0x64, 0x70, 0x05, 0x6c, 0x6f, 0x63, 0x61,
+                0x6c, 0x00, 0x00, 0x0c, 0x00, 0x01,
+            ],
+            ports: vec![5353],
+        },
+        UdpProbe {
+            name: "STUN".to_string(),
+            payload: vec![
+                0x00, 0x01, 0x00, 0x00, 0x21, 0x12, 0xa4, 0x42,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
+            ],
+            ports: vec![3478],
+        },
+    ]
+}
+
+pub async fn probe_udp(target: Ipv4Addr, port: u16, timeout: Duration) -> Result<(bool, Option<Vec<u8>>)> {
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    let target_addr = SocketAddrV4::new(target, port);
+
+    let probe = get_default_probes()
+        .into_iter()
+        .find(|p| p.ports.contains(&port));
+
+    let payload = probe.map(|p| p.payload).unwrap_or_else(|| vec![0, 0]);
+
+    socket.send_to(&payload, target_addr).await?;
+
+    let mut buf = vec![0u8; 65535];
+    match tokio::time::timeout(timeout, socket.recv_from(&mut buf)).await {
+        Ok(Ok((n, _))) => {
+            debug!("UDP port {} responded with {} bytes", port, n);
+            Ok((true, Some(buf[..n].to_vec())))
+        }
+        Ok(Err(e)) => {
+            debug!("UDP port {} error: {}", port, e);
+            Ok((false, None))
+        }
+        Err(_) => {
+            debug!("UDP port {} timeout", port);
+            Ok((false, None))
+        }
+    }
+}
+
+pub async fn probe_udp_ports(
+    target: Ipv4Addr,
+    ports: &[u16],
+    timeout: Duration,
+    max_concurrent: usize,
+) -> Vec<(u16, bool, Option<Vec<u8>>)> {
+    use futures::stream::{self, StreamExt};
+
+    stream::iter(ports)
+        .map(|&port| async move {
+            match probe_udp(target, port, timeout).await {
+                Ok((responded, data)) => (port, responded, data),
+                Err(_) => (port, false, None),
+            }
+        })
+        .buffer_unordered(max_concurrent)
+        .collect()
+        .await
+}

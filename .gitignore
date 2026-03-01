@@ -1,0 +1,62 @@
+# Build
+**/target/
+**/*.rs.bk
+Cargo.lock
+.cargo/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Output
+*.log
+results/
+
+# Claude
+.claude/
+
+# Node (Tauri UI)
+node_modules/
+dist/
+package-lock.json
+
+# Misc docs (keep README.md and LICENSE only)
+ADMIN_RUN_WINDOWS.md
+CHANGELOG.md
+DAY_ONE_COMPLETE.md
+FUTUREPLAN.md
+INSTALL_WINDOWS.md
+MILESTONE_*.md
+NMAP_DATA_AUDIT.md
+PROGRESS.md
+PROJECT_SUMMARY.md
+QUICKSTART.md
+TESTING_GUIDE.md
+TESTS.md
+UI_README.md
+V0.4_SUMMARY.md
+description.md
+geminidocs.md
+
+# Test scripts
+test-tokmap.ps1
+
+# Nmap data files (download separately from https://github.com/nmap/nmap/)
+nmap-*
+
+# Stale files
+query
+UsersvarolDesktoptokmapnmap-service-probes
+
+# Secrets
+.env
+*.key
+*.pem
+credentials*

@@ -1,0 +1,21 @@
+[package]
+name = "tokmap-ui"
+version = "0.4.0"
+description = "Tokmap GUI"
+authors = ["Tokmap Contributors"]
+license = "MIT"
+repository = ""
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+tauri = { version = "1.5", features = ["shell-open"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokmap = { path = ".." }
+tokio = { version = "1.42", features = ["full"] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

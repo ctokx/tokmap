@@ -1,0 +1,33 @@
+[package]
+name = "tokmap"
+version = "0.4.0"
+edition = "2021"
+authors = ["Tokmap Contributors"]
+description = "Asynchronous network scanner with nmap signature database and optional LLM analysis"
+
+[[bin]]
+name = "tokmap"
+path = "src/bin/main.rs"
+
+[lib]
+name = "tokmap"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1.42", features = ["full"] }
+pnet = "0.35"
+pnet_packet = "0.35"
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ipnetwork = "0.20"
+futures = "0.3"
+async-channel = "2.3"
+rand = "0.8"
+reqwest = { version = "0.12", features = ["json"] }
+regex = "1.11"
+atty = "0.2"
