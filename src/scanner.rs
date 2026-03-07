@@ -1,5 +1,5 @@
 use crate::llm::LLMAnalyzer;
-use crate::os_db::OSDatabase;
+use crate::os_db::{OSDatabase, ObservedFingerprint};
 use crate::packet::{build_ether_syn_packet, parse_tcp_response, random_source_port, TcpResponseType, TcpFingerprint};
 use crate::service;
 use crate::service_db::ServiceMatcher;
@@ -23,10 +23,15 @@ pub struct Scanner {
     config: ScanConfig,
     service_matcher: Option<ServiceMatcher>,
     os_db: Option<OSDatabase>,
+    llm_provider_name: Option<String>,
 }
 
 impl Scanner {
     pub fn new(config: ScanConfig) -> Self {
+        Self::with_llm_provider(config, None)
+    }
+
+    pub fn with_llm_provider(config: ScanConfig, llm_provider: Option<String>) -> Self {
         let matcher = match ServiceMatcher::load_default() {
             Ok(m) => {
                 info!("Loaded Nmap service signature database");
@@ -54,6 +59,7 @@ impl Scanner {
             config,
             service_matcher: matcher,
             os_db,
+            llm_provider_name: llm_provider,
         }
     }
 
@@ -267,9 +273,14 @@ impl Scanner {
 
         if self.config.llm_enabled {
             info!("Starting LLM analysis for open ports");
-            let llm = LLMAnalyzer::from_env();
+            let llm = if let Some(ref provider_name) = self.llm_provider_name {
+                LLMAnalyzer::from_provider_name(provider_name)
+            } else {
+                LLMAnalyzer::from_env()
+            };
 
             if llm.is_enabled() {
+                info!("Using {} LLM provider", llm.provider_name());
                 for port_result in &mut port_results {
                     if port_result.state == PortState::Open {
                         if let Some(ref service_info) = port_result.service {
@@ -290,7 +301,7 @@ impl Scanner {
                     }
                 }
             } else {
-                warn!("LLM enabled but GEMINI_API_KEY not set");
+                warn!("LLM enabled but no API key found. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or OLLAMA_HOST");
             }
         }
 
@@ -299,10 +310,24 @@ impl Scanner {
         let mut os_guess = None;
         let mut os_fingerprint_str = None;
 
-        if let Some(fp) = fingerprints.first() {
-            os_fingerprint_str = Some(format!("TTL={}, WIN={}", fp.ttl, fp.window_size));
+        if self.config.os_detection && !fingerprints.is_empty() {
+            let window_sizes: Vec<u16> = fingerprints.iter().map(|f| f.window_size).collect();
+            let ttl = fingerprints[0].ttl;
+
+            os_fingerprint_str = Some(format!("TTL={} WIN={}", ttl, window_sizes.iter().map(|w| format!("{:X}", w)).collect::<Vec<_>>().join(",")));
+
             if let Some(db) = &self.os_db {
-                if let Some(matched) = db.match_os(fp.ttl, fp.window_size) {
+                let observed = ObservedFingerprint::from_responses(ttl, window_sizes, &[]);
+                let matches = db.match_fingerprint(&observed);
+                if let Some(best) = matches.first() {
+                    os_guess = Some(format!("{} (score: {:.0}%)", best.name, best.score * 100.0));
+                    debug!("OS detection: {} candidates, best: {} ({:.0}%)", matches.len(), best.name, best.score * 100.0);
+                }
+            }
+        } else if !fingerprints.is_empty() {
+            os_fingerprint_str = Some(format!("TTL={}, WIN={}", fingerprints[0].ttl, fingerprints[0].window_size));
+            if let Some(db) = &self.os_db {
+                if let Some(matched) = db.match_os(fingerprints[0].ttl, fingerprints[0].window_size) {
                     os_guess = Some(matched.name.clone());
                 }
             }
@@ -318,7 +343,6 @@ impl Scanner {
         })
     }
 
-    /// Fallback when ARP resolution fails (e.g. scanning non-local targets)
     async fn scan_host_connect(&self, target: IpAddr, _target_v4: Ipv4Addr) -> Result<HostResult> {
         let start_time = Instant::now();
         let results_map: Arc<Mutex<HashMap<u16, PortResult>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -354,7 +378,28 @@ impl Scanner {
 
         let map = results_map.lock().await;
         let mut port_results: Vec<_> = map.values().cloned().collect();
+        drop(map);
         port_results.sort_by_key(|r| r.port);
+
+        if self.config.service_detection {
+            for port_result in &mut port_results {
+                if port_result.state == PortState::Open {
+                    match service::grab_banner_with_db(
+                        target,
+                        port_result.port,
+                        self.config.timeout,
+                        self.service_matcher.as_ref()
+                    ).await {
+                        Ok(service_info) => {
+                            port_result.service = Some(service_info);
+                        }
+                        Err(e) => {
+                            debug!("Failed to detect service on {}:{}: {}", target, port_result.port, e);
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(HostResult {
             ip: target,
@@ -408,7 +453,6 @@ fn receive_responses_datalink(
     }
 }
 
-/// Find the first non-loopback IPv4 address on the system
 fn get_source_ip(_target: Ipv4Addr) -> Result<Ipv4Addr> {
     let interfaces = datalink::interfaces();
     for interface in interfaces {

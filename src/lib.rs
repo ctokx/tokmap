@@ -21,3 +21,4 @@ pub use llm::{LLMAnalyzer, LLMProvider, LLMAnalysis};
 pub use target::parse_targets;
 pub use timing::{TimingTemplate, TimingConfig};
 pub use discovery::DiscoveryMethod;
+pub use os_db::{OSDatabase, ObservedFingerprint};

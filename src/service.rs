@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crate::service_db::ServiceMatcher;
+use crate::service_db::{ServiceMatcher, Probe};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -13,6 +13,10 @@ pub struct ServiceInfo {
     pub version: Option<String>,
     pub banner: String,
     pub confidence: Confidence,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpe: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -30,9 +34,17 @@ pub async fn grab_banner_with_db(
     matcher: Option<&ServiceMatcher>,
 ) -> Result<ServiceInfo> {
     let addr = SocketAddr::new(ip, port);
+
+    if let Some(matcher) = matcher {
+        let probes = matcher.get_probes_for_port(port);
+        if let Some(result) = try_active_probes(ip, port, addr, probe_timeout, &probes, matcher).await {
+            return Ok(result);
+        }
+    }
+
     let mut stream = timeout(probe_timeout, TcpStream::connect(addr)).await??;
 
-    let mut buffer = vec![0u8; 1024];
+    let mut buffer = vec![0u8; 4096];
     let banner = match timeout(Duration::from_millis(500), stream.read(&mut buffer)).await {
         Ok(Ok(n)) if n > 0 => {
             let banner_text = String::from_utf8_lossy(&buffer[..n]).to_string();
@@ -45,24 +57,94 @@ pub async fn grab_banner_with_db(
         }
     };
 
-    // Try database matching first
     if let Some(matcher) = matcher {
         if let Some(db_match) = matcher.match_banner(&banner, port) {
             debug!("Database matched service: {} on {}:{}", db_match.service_name, ip, port);
             return Ok(ServiceInfo {
-                service_name: db_match.product.unwrap_or(db_match.service_name),
-                version: db_match.version,
+                service_name: db_match.product.clone().unwrap_or(db_match.service_name.clone()),
+                version: db_match.version.clone(),
                 banner: banner.clone(),
                 confidence: match db_match.confidence {
                     crate::service_db::Confidence::High => Confidence::High,
                     crate::service_db::Confidence::Medium => Confidence::Medium,
                     crate::service_db::Confidence::Low => Confidence::Low,
                 },
+                cpe: if db_match.cpe.is_empty() { None } else { Some(db_match.cpe) },
+                os_hint: db_match.os,
             });
         }
     }
 
     Ok(identify_service(port, &banner))
+}
+
+async fn try_active_probes(
+    ip: IpAddr,
+    port: u16,
+    addr: SocketAddr,
+    probe_timeout: Duration,
+    probes: &[&Probe],
+    matcher: &ServiceMatcher,
+) -> Option<ServiceInfo> {
+    for probe in probes {
+        if probe.payload.is_empty() {
+            continue;
+        }
+
+        debug!("Sending probe '{}' to {}:{} ({} bytes)", probe.name, ip, port, probe.payload.len());
+
+        let wait = Duration::from_millis(probe.total_wait_ms.min(probe_timeout.as_millis() as u64));
+
+        let result = timeout(wait, async {
+            let mut stream = TcpStream::connect(addr).await?;
+            stream.write_all(&probe.payload).await?;
+
+            let mut buffer = vec![0u8; 4096];
+            let mut total_read = 0;
+
+            loop {
+                match timeout(Duration::from_millis(800), stream.read(&mut buffer[total_read..])).await {
+                    Ok(Ok(0)) => break,
+                    Ok(Ok(n)) => {
+                        total_read += n;
+                        if total_read >= 4096 {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+
+            Ok::<Vec<u8>, anyhow::Error>(buffer[..total_read].to_vec())
+        }).await;
+
+        if let Ok(Ok(response)) = result {
+            if response.is_empty() {
+                continue;
+            }
+
+            let banner = String::from_utf8_lossy(&response).to_string();
+            debug!("Probe '{}' got {} bytes from {}:{}", probe.name, response.len(), ip, port);
+
+            if let Some(db_match) = matcher.match_banner(&banner, port) {
+                debug!("Active probe '{}' matched: {} on {}:{}", probe.name, db_match.service_name, ip, port);
+                return Some(ServiceInfo {
+                    service_name: db_match.product.clone().unwrap_or(db_match.service_name.clone()),
+                    version: db_match.version.clone(),
+                    banner,
+                    confidence: match db_match.confidence {
+                        crate::service_db::Confidence::High => Confidence::High,
+                        crate::service_db::Confidence::Medium => Confidence::Medium,
+                        crate::service_db::Confidence::Low => Confidence::Low,
+                    },
+                    cpe: if db_match.cpe.is_empty() { None } else { Some(db_match.cpe) },
+                    os_hint: db_match.os,
+                });
+            }
+        }
+    }
+
+    None
 }
 
 pub async fn grab_banner(
@@ -78,18 +160,10 @@ async fn send_probe(stream: &mut TcpStream, port: u16) -> Result<String> {
         80 | 8080 | 8000 | 8888 => {
             "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n"
         }
-        443 | 8443 => {
-            return Ok(String::new());
-        }
-        21 => {
-            return Ok(String::new());
-        }
-        25 | 587 => {
-            return Ok(String::new());
-        }
-        _ => {
-            return Ok(String::new());
-        }
+        443 | 8443 => return Ok(String::new()),
+        21 => return Ok(String::new()),
+        25 | 587 => return Ok(String::new()),
+        _ => return Ok(String::new()),
     };
 
     stream.write_all(probe.as_bytes()).await?;
@@ -134,6 +208,8 @@ fn identify_service(port: u16, banner: &str) -> ServiceInfo {
             version: None,
             banner: banner.to_string(),
             confidence: Confidence::Medium,
+            cpe: None,
+            os_hint: None,
         };
     }
 
@@ -143,6 +219,8 @@ fn identify_service(port: u16, banner: &str) -> ServiceInfo {
             version: None,
             banner: banner.to_string(),
             confidence: Confidence::Medium,
+            cpe: None,
+            os_hint: None,
         };
     }
 
@@ -152,6 +230,8 @@ fn identify_service(port: u16, banner: &str) -> ServiceInfo {
             version: None,
             banner: banner.to_string(),
             confidence: Confidence::Low,
+            cpe: None,
+            os_hint: None,
         };
     }
 
@@ -178,6 +258,8 @@ fn parse_ssh_banner(banner: &str) -> ServiceInfo {
         version,
         banner: banner.to_string(),
         confidence: Confidence::High,
+        cpe: None,
+        os_hint: None,
     }
 }
 
@@ -219,6 +301,8 @@ fn parse_http_banner(banner: &str) -> ServiceInfo {
         version,
         banner: banner.lines().take(10).collect::<Vec<_>>().join("\n"),
         confidence,
+        cpe: None,
+        os_hint: None,
     }
 }
 
@@ -244,12 +328,13 @@ fn parse_ftp_banner(banner: &str) -> ServiceInfo {
         version,
         banner: banner.to_string(),
         confidence,
+        cpe: None,
+        os_hint: None,
     }
 }
 
 fn parse_smtp_banner(banner: &str) -> ServiceInfo {
     let mut service_name = "SMTP".to_string();
-    let version = None;
 
     if banner.contains("Postfix") {
         service_name = "Postfix".to_string();
@@ -263,9 +348,11 @@ fn parse_smtp_banner(banner: &str) -> ServiceInfo {
 
     ServiceInfo {
         service_name,
-        version,
+        version: None,
         banner: banner.to_string(),
         confidence: Confidence::Medium,
+        cpe: None,
+        os_hint: None,
     }
 }
 
@@ -275,6 +362,8 @@ fn parse_mysql_banner(banner: &str) -> ServiceInfo {
         version: None,
         banner: banner.to_string(),
         confidence: Confidence::Medium,
+        cpe: None,
+        os_hint: None,
     }
 }
 
@@ -305,6 +394,8 @@ fn identify_by_port(port: u16, banner: &str) -> ServiceInfo {
         version: None,
         banner: banner.to_string(),
         confidence,
+        cpe: None,
+        os_hint: None,
     }
 }
 
@@ -362,5 +453,19 @@ mod tests {
         let banner = "220 mail.example.com ESMTP Postfix";
         let info = parse_smtp_banner(banner);
         assert_eq!(info.service_name, "Postfix");
+    }
+
+    #[test]
+    fn test_service_info_has_cpe_field() {
+        let info = ServiceInfo {
+            service_name: "nginx".to_string(),
+            version: Some("1.18.0".to_string()),
+            banner: "test".to_string(),
+            confidence: Confidence::High,
+            cpe: Some(vec!["cpe:/a:nginx:nginx:1.18.0".to_string()]),
+            os_hint: None,
+        };
+        assert!(info.cpe.is_some());
+        assert_eq!(info.cpe.unwrap().len(), 1);
     }
 }

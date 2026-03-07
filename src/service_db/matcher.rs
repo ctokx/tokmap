@@ -39,10 +39,13 @@ impl ServiceMatcher {
         &self.db
     }
 
+    pub fn get_probes_for_port(&self, port: u16) -> Vec<&Probe> {
+        self.db.get_probes_for_port(port)
+    }
+
     pub fn match_banner(&self, banner: &str, port: u16) -> Option<ServiceMatch> {
         let probes = self.db.get_probes_for_port(port);
 
-        // Hard matches first (higher confidence)
         for probe in &probes {
             for m in &probe.matches {
                 if let Some(service_match) = self.try_match(m, banner, false) {
@@ -51,7 +54,6 @@ impl ServiceMatcher {
             }
         }
 
-        // Fall back to soft matches
         for probe in &probes {
             for m in &probe.soft_matches {
                 if let Some(service_match) = self.try_match(m, banner, true) {
@@ -68,7 +70,6 @@ impl ServiceMatcher {
 
         let mut version_info = m.version_info.clone();
 
-        // Substitute capture groups ($1, $2, etc.) in version info templates
         version_info.product = substitute_captures(&version_info.product, &captures);
         version_info.version = substitute_captures(&version_info.version, &captures);
         version_info.info = substitute_captures(&version_info.info, &captures);
@@ -97,11 +98,7 @@ fn substitute_captures(template: &Option<String>, captures: &regex::Captures) ->
         }
     }
 
-    if result.contains('$') && result == *template {
-        Some(result)
-    } else {
-        Some(result)
-    }
+    Some(result)
 }
 
 #[cfg(test)]
@@ -131,5 +128,12 @@ mod tests {
         let result = substitute_captures(&template, &captures);
 
         assert_eq!(result, Some("2.3.4 on example.com".to_string()));
+    }
+
+    #[test]
+    fn test_substitute_none_template() {
+        let re = Regex::new(r"test").unwrap();
+        let captures = re.captures("test").unwrap();
+        assert_eq!(substitute_captures(&None, &captures), None);
     }
 }

@@ -1,4 +1,5 @@
-use super::types::{LLMAnalysis, ServiceIdentification, VulnerabilityAssessment, RiskLevel};
+use super::types::{LLMAnalysis, ServiceIdentification, VulnerabilityAssessment};
+use super::claude::{extract_json, parse_risk_level};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use reqwest::Client;
@@ -89,6 +90,14 @@ Only include confirmed information. If version is unknown, provide general guida
         self.parse_vulnerability_assessment(&response_text)
     }
 
+    pub async fn generate_report(&self, scan_json: &str) -> Result<String> {
+        let prompt = format!(
+            "You are a cybersecurity expert. Analyze these scan results and produce an executive security report.\n\nScan Results:\n{}\n\nProduce: Executive Summary, Critical Findings, Risk Assessment, Remediation Priorities.",
+            scan_json
+        );
+        self.generate_content(&prompt).await
+    }
+
     async fn generate_content(&self, prompt: &str) -> Result<String> {
         let request = GeminiRequest {
             contents: vec![Content {
@@ -134,7 +143,7 @@ Only include confirmed information. If version is unknown, provide general guida
     }
 
     fn parse_analysis(&self, response: &str) -> Result<LLMAnalysis> {
-        let json_str = self.extract_json(response);
+        let json_str = extract_json(response);
 
         #[derive(Deserialize)]
         struct ParsedResponse {
@@ -159,7 +168,7 @@ Only include confirmed information. If version is unknown, provide general guida
                 reasoning: parsed.reasoning,
             }),
             vulnerability_assessment: Some(VulnerabilityAssessment {
-                risk_level: self.parse_risk_level(&parsed.risk_level),
+                risk_level: parse_risk_level(&parsed.risk_level),
                 known_cves: parsed.vulnerabilities,
                 potential_issues: parsed.potential_issues,
                 remediation_steps: parsed.recommendations.clone(),
@@ -170,7 +179,7 @@ Only include confirmed information. If version is unknown, provide general guida
     }
 
     fn parse_vulnerability_assessment(&self, response: &str) -> Result<VulnerabilityAssessment> {
-        let json_str = self.extract_json(response);
+        let json_str = extract_json(response);
 
         #[derive(Deserialize)]
         struct ParsedVuln {
@@ -183,42 +192,11 @@ Only include confirmed information. If version is unknown, provide general guida
         let parsed: ParsedVuln = serde_json::from_str(&json_str)?;
 
         Ok(VulnerabilityAssessment {
-            risk_level: self.parse_risk_level(&parsed.risk_level),
+            risk_level: parse_risk_level(&parsed.risk_level),
             known_cves: parsed.known_cves,
             potential_issues: parsed.potential_issues,
             remediation_steps: parsed.remediation_steps,
         })
-    }
-
-    /// Strip markdown code fences if present, return raw JSON
-    fn extract_json(&self, text: &str) -> String {
-        if let Some(start) = text.find("```json") {
-            let json_start = start + 7;
-            if let Some(end_pos) = text[json_start..].find("```") {
-                let json_end = json_start + end_pos;
-                return text[json_start..json_end].trim().to_string();
-            }
-        }
-
-        if let Some(start) = text.find("```") {
-            let content_start = start + 3;
-            if let Some(end_pos) = text[content_start..].find("```") {
-                let content_end = content_start + end_pos;
-                return text[content_start..content_end].trim().to_string();
-            }
-        }
-
-        text.trim().to_string()
-    }
-
-    fn parse_risk_level(&self, level: &str) -> RiskLevel {
-        match level.to_lowercase().as_str() {
-            "critical" => RiskLevel::Critical,
-            "high" => RiskLevel::High,
-            "medium" => RiskLevel::Medium,
-            "low" => RiskLevel::Low,
-            _ => RiskLevel::Info,
-        }
     }
 }
 
@@ -265,31 +243,28 @@ struct Candidate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::RiskLevel;
 
     #[test]
     fn test_extract_json() {
-        let client = GeminiClient::new("test".to_string());
-
         let input = r#"Sure! Here's the analysis:
 ```json
 {"service": "nginx"}
 ```
 Hope this helps!"#;
-        let result = client.extract_json(input);
+        let result = extract_json(input);
         assert_eq!(result, r#"{"service": "nginx"}"#);
 
         let input2 = r#"{"service": "apache"}"#;
-        let result2 = client.extract_json(input2);
+        let result2 = extract_json(input2);
         assert_eq!(result2, r#"{"service": "apache"}"#);
     }
 
     #[test]
     fn test_parse_risk_level() {
-        let client = GeminiClient::new("test".to_string());
-
-        assert!(matches!(client.parse_risk_level("critical"), RiskLevel::Critical));
-        assert!(matches!(client.parse_risk_level("HIGH"), RiskLevel::High));
-        assert!(matches!(client.parse_risk_level("Medium"), RiskLevel::Medium));
-        assert!(matches!(client.parse_risk_level("unknown"), RiskLevel::Info));
+        assert!(matches!(parse_risk_level("critical"), RiskLevel::Critical));
+        assert!(matches!(parse_risk_level("HIGH"), RiskLevel::High));
+        assert!(matches!(parse_risk_level("Medium"), RiskLevel::Medium));
+        assert!(matches!(parse_risk_level("unknown"), RiskLevel::Info));
     }
 }

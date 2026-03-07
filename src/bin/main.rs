@@ -1,126 +1,103 @@
 use anyhow::Result;
 use clap::Parser;
 use std::time::Duration;
-use tokmap::{output, parse_targets, ports, Scanner, ScanConfig, ScanType, TimingTemplate};
-use tracing::{info, Level};
+use tokmap::{output, parse_targets, ports, Scanner, ScanConfig, ScanType, TimingTemplate, LLMAnalyzer};
+use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about = "Tokmap - AI-powered network scanner", long_about = None)]
 struct Args {
-    /// Target specification (IP, CIDR, hostname, range)
     #[arg(short, long, value_delimiter = ',')]
     targets: Vec<String>,
 
-    /// Ports to scan (comma-separated or range like 1-1000)
     #[arg(short, long, value_delimiter = ',')]
     ports: Option<Vec<String>>,
 
-    /// Scan top N most common ports
     #[arg(long = "top-ports")]
     top_ports: Option<usize>,
 
-    /// Fast mode - scan top 100 ports
     #[arg(short = 'F', long)]
     fast: bool,
 
-    /// Timing template: paranoid(0), sneaky(1), polite(2), normal(3), aggressive(4), insane(5)
     #[arg(short = 'T', long, value_parser = clap::value_parser!(u8).range(0..=5))]
     timing: Option<u8>,
 
-    /// Timeout per port in milliseconds (overrides timing template)
     #[arg(long)]
     timeout: Option<u64>,
 
-    /// Maximum concurrent scans (overrides timing template)
     #[arg(short, long)]
     concurrency: Option<usize>,
 
-    /// Rate limit (packets per second)
     #[arg(short, long)]
     rate_limit: Option<u32>,
 
-    /// TCP SYN scan (default, requires raw socket privileges)
     #[arg(long = "syn", short = 'S')]
     syn_scan: bool,
 
-    /// TCP connect scan (no privileges required)
-    #[arg(long = "connect", short = 'T')]
+    #[arg(long = "connect")]
     connect_scan: bool,
 
-    /// TCP ACK scan (firewall rule discovery)
-    #[arg(long = "ack", short = 'A')]
+    #[arg(long = "ack")]
     ack_scan: bool,
 
-    /// TCP Window scan
-    #[arg(long = "window", short = 'W')]
+    #[arg(long = "window")]
     window_scan: bool,
 
-    /// TCP FIN scan (stealth)
-    #[arg(long = "fin", short = 'F')]
+    #[arg(long = "fin")]
     fin_scan: bool,
 
-    /// TCP NULL scan (stealth)
-    #[arg(long = "null", short = 'N')]
+    #[arg(long = "null")]
     null_scan: bool,
 
-    /// TCP Xmas scan (stealth)
-    #[arg(long = "xmas", short = 'X')]
+    #[arg(long = "xmas")]
     xmas_scan: bool,
 
-    /// UDP scan
     #[arg(long = "udp", short = 'U')]
     udp_scan: bool,
 
-    /// Treat all hosts as online (skip host discovery)
     #[arg(short = 'P', long)]
     skip_discovery: bool,
 
-    /// Ping scan only (no port scan)
     #[arg(long)]
     ping_scan: bool,
 
-    /// Enable service/version detection (banner grabbing)
     #[arg(short = 's', long = "service-detect")]
     service_detection: bool,
 
-    /// Version detection intensity (0-9, default 7)
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=9))]
     version_intensity: Option<u8>,
 
-    /// Enable OS detection
     #[arg(short = 'O', long = "os-detect")]
     os_detection: bool,
 
-    /// Aggressive scan (-O -sV --traceroute)
     #[arg(short = 'A', long)]
     aggressive: bool,
 
-    /// Enable LLM-powered analysis (requires GEMINI_API_KEY env var)
     #[arg(long = "llm")]
     llm_enabled: bool,
 
-    /// Never do DNS resolution
+    #[arg(long = "llm-provider", value_name = "PROVIDER")]
+    llm_provider: Option<String>,
+
+    #[arg(long = "report")]
+    generate_report: bool,
+
     #[arg(short = 'n', long)]
     no_dns: bool,
 
-    /// Always resolve (default behavior)
     #[arg(short = 'R', long)]
     dns_servers: bool,
 
-    /// Output file for JSON results
     #[arg(short, long)]
     output: Option<String>,
 
-    /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
 
-    /// JSON-only output (no summary)
     #[arg(long)]
     json_only: bool,
 
-    /// Nmap-style table output (default for terminal)
     #[arg(long)]
     nmap_style: bool,
 }
@@ -170,7 +147,7 @@ async fn main() -> Result<()> {
         eprintln!("Error: At least one target must be specified");
         eprintln!("Example: tokmap -t 192.168.1.1");
         eprintln!("         tokmap -t 192.168.1.0/24 -F");
-        eprintln!("         tokmap -t scanme.nmap.org --service-detect");
+        eprintln!("         tokmap -t scanme.nmap.org --service-detect --llm --llm-provider claude");
         std::process::exit(1);
     }
 
@@ -205,7 +182,7 @@ async fn main() -> Result<()> {
     let timing_config = timing.to_config();
 
     info!(
-        "Tokmap v{} - Network Scanner",
+        "Tokmap v{} - AI-Powered Network Scanner",
         env!("CARGO_PKG_VERSION")
     );
     info!("Timing: {}", timing);
@@ -214,6 +191,11 @@ async fn main() -> Result<()> {
 
     let service_detection = args.service_detection || args.aggressive;
     let os_detection = args.os_detection || args.aggressive;
+
+    if args.llm_enabled {
+        let provider_name = args.llm_provider.as_deref().unwrap_or("auto");
+        info!("LLM analysis enabled (provider: {})", provider_name);
+    }
 
     let config = ScanConfig {
         targets: target_ips.clone(),
@@ -232,7 +214,7 @@ async fn main() -> Result<()> {
         resolve_dns: !args.no_dns,
     };
 
-    let scanner = Scanner::new(config);
+    let scanner = Scanner::with_llm_provider(config, args.llm_provider.clone());
     let results = scanner.scan().await?;
 
     let open_ports: usize = results
@@ -256,6 +238,35 @@ async fn main() -> Result<()> {
         }
     } else {
         output::OutputFormatter::write_json(&results)?;
+    }
+
+    if args.generate_report {
+        let llm = if let Some(ref provider_name) = args.llm_provider {
+            LLMAnalyzer::from_provider_name(provider_name)
+        } else {
+            LLMAnalyzer::from_env()
+        };
+
+        if llm.is_enabled() {
+            info!("Generating security report...");
+            let scan_json = serde_json::to_string_pretty(&results)?;
+            match llm.generate_report(&scan_json).await {
+                Ok(Some(report)) => {
+                    println!("\n{}", "=".repeat(60));
+                    println!("SECURITY REPORT (Generated by {} LLM)", llm.provider_name());
+                    println!("{}", "=".repeat(60));
+                    println!("{}", report);
+                }
+                Ok(None) => {
+                    warn!("Report generation returned empty result");
+                }
+                Err(e) => {
+                    warn!("Report generation failed: {}", e);
+                }
+            }
+        } else {
+            eprintln!("Error: --report requires an LLM provider. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY");
+        }
     }
 
     info!(
