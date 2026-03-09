@@ -1,4 +1,5 @@
 pub mod discovery;
+pub mod os_probe;
 pub mod llm;
 pub mod nmap_data;
 pub mod os_db;
@@ -11,6 +12,7 @@ pub mod service_db;
 pub mod target;
 pub mod timing;
 pub mod types;
+pub mod tls;
 pub mod udp;
 
 pub use types::{HostResult, PortResult, PortState, Protocol, ScanConfig, ScanResults, ScanType};

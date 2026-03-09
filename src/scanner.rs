@@ -1,5 +1,6 @@
 use crate::llm::LLMAnalyzer;
 use crate::os_db::{OSDatabase, ObservedFingerprint};
+use crate::os_probe::{build_observed_fingerprint, find_closed_port, find_open_port, send_os_probes};
 use crate::packet::{build_ether_syn_packet, parse_tcp_response, random_source_port, TcpResponseType, TcpFingerprint};
 use crate::service;
 use crate::service_db::ServiceMatcher;
@@ -310,22 +311,64 @@ impl Scanner {
         let mut os_guess = None;
         let mut os_fingerprint_str = None;
 
-        if self.config.os_detection && !fingerprints.is_empty() {
-            let window_sizes: Vec<u16> = fingerprints.iter().map(|f| f.window_size).collect();
-            let ttl = fingerprints[0].ttl;
+        if self.config.os_detection {
+            let open_ports: Vec<u16> = port_results.iter()
+                .filter(|r| r.state == PortState::Open)
+                .map(|r| r.port)
+                .collect();
 
-            os_fingerprint_str = Some(format!("TTL={} WIN={}", ttl, window_sizes.iter().map(|w| format!("{:X}", w)).collect::<Vec<_>>().join(",")));
+            let active_fp = if let Some(open_port) = find_open_port(&open_ports) {
+                let closed_port = find_closed_port(&open_ports);
+                info!("Sending OS fingerprint probes to {}:{} (open) / {} (closed)", target, open_port, closed_port);
 
-            if let Some(db) = &self.os_db {
-                let observed = ObservedFingerprint::from_responses(ttl, window_sizes, &[]);
-                let matches = db.match_fingerprint(&observed);
-                if let Some(best) = matches.first() {
-                    os_guess = Some(format!("{} (score: {:.0}%)", best.name, best.score * 100.0));
-                    debug!("OS detection: {} candidates, best: {} ({:.0}%)", matches.len(), best.name, best.score * 100.0);
+                let interface2 = Self::find_interface_by_ip(src_ip)
+                    .ok_or_else(|| anyhow::anyhow!("Interface not found for OS probes"))?;
+
+                let probe_result = tokio::task::spawn_blocking(move || {
+                    let (mut tx2, mut rx2) = match datalink::channel(&interface2, Default::default()) {
+                        Ok(datalink::Channel::Ethernet(t, r)) => (t, r),
+                        _ => return None,
+                    };
+                    Some(send_os_probes(
+                        &mut tx2, &mut rx2,
+                        src_mac, dst_mac,
+                        src_ip, target_v4,
+                        open_port, closed_port,
+                    ))
+                }).await.ok().flatten();
+
+                probe_result.and_then(|r| build_observed_fingerprint(&r))
+            } else if !fingerprints.is_empty() {
+                let window_sizes: Vec<u16> = fingerprints.iter().map(|f| f.window_size).collect();
+                let ttl = fingerprints[0].ttl;
+                Some(ObservedFingerprint::from_responses(ttl, window_sizes, &[]))
+            } else {
+                None
+            };
+
+            if let Some(observed) = active_fp {
+                os_fingerprint_str = Some(format!("TTL={} WIN={} SP={} GCD={} ISR={}",
+                    observed.ttl,
+                    observed.window_sizes.iter().map(|w| format!("{:X}", w)).collect::<Vec<_>>().join(","),
+                    observed.sp, observed.gcd, observed.isr));
+
+                if let Some(db) = &self.os_db {
+                    let matches = db.match_fingerprint(&observed);
+                    if let Some(best) = matches.first() {
+                        os_guess = Some(format!("{} (score: {:.0}%)", best.name, best.score * 100.0));
+                        debug!("OS detection: {} candidates, best: {} ({:.0}%)", matches.len(), best.name, best.score * 100.0);
+                    }
+                }
+            } else if !fingerprints.is_empty() {
+                os_fingerprint_str = Some(format!("TTL={} WIN={}", fingerprints[0].ttl, fingerprints[0].window_size));
+                if let Some(db) = &self.os_db {
+                    if let Some(matched) = db.match_os(fingerprints[0].ttl, fingerprints[0].window_size) {
+                        os_guess = Some(matched.name.clone());
+                    }
                 }
             }
         } else if !fingerprints.is_empty() {
-            os_fingerprint_str = Some(format!("TTL={}, WIN={}", fingerprints[0].ttl, fingerprints[0].window_size));
+            os_fingerprint_str = Some(format!("TTL={} WIN={}", fingerprints[0].ttl, fingerprints[0].window_size));
             if let Some(db) = &self.os_db {
                 if let Some(matched) = db.match_os(fingerprints[0].ttl, fingerprints[0].window_size) {
                     os_guess = Some(matched.name.clone());

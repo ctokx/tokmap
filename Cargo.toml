@@ -1,6 +1,6 @@
 [package]
 name = "tokmap"
-version = "0.6.0"
+version = "0.9.0"
 edition = "2021"
 authors = ["Tokmap Contributors"]
 description = "Asynchronous network scanner with nmap signature database and optional LLM analysis"
@@ -31,3 +31,8 @@ rand = "0.8"
 reqwest = { version = "0.12", features = ["json"] }
 regex = "1.11"
 atty = "0.2"
+rustls = "0.23"
+tokio-rustls = "0.26"
+webpki-roots = "0.26"
+rustls-pki-types = "1"
+rhai = "1.24.0"

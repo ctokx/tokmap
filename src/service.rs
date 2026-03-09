@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crate::service_db::{ServiceMatcher, Probe};
+use crate::tls::{self, TlsCertInfo};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -17,6 +18,8 @@ pub struct ServiceInfo {
     pub cpe: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub os_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_info: Option<TlsCertInfo>,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -34,11 +37,41 @@ pub async fn grab_banner_with_db(
     matcher: Option<&ServiceMatcher>,
 ) -> Result<ServiceInfo> {
     let addr = SocketAddr::new(ip, port);
+    let use_tls = tls::is_likely_ssl_port(port);
 
     if let Some(matcher) = matcher {
         let probes = matcher.get_probes_for_port(port);
+        let has_ssl_probes = probes.iter().any(|p| {
+            p.ssl_ports.as_ref().map_or(false, |sp| sp.contains(&port))
+        });
+
+        let try_tls = use_tls || has_ssl_probes;
+
+        if try_tls {
+            if let Some(result) = try_tls_active_probes(ip, port, probe_timeout, &probes, matcher).await {
+                return Ok(result);
+            }
+        }
+
         if let Some(result) = try_active_probes(ip, port, addr, probe_timeout, &probes, matcher).await {
             return Ok(result);
+        }
+    } else if use_tls {
+        if let Ok((banner, cert_info)) = tls::tls_grab_banner(ip, port, probe_timeout).await {
+            if !banner.is_empty() {
+                let mut info = identify_service(port, &banner);
+                info.tls_info = cert_info;
+                return Ok(info);
+            }
+            return Ok(ServiceInfo {
+                service_name: "HTTPS".to_string(),
+                version: None,
+                banner: String::new(),
+                confidence: Confidence::Medium,
+                cpe: None,
+                os_hint: None,
+                tls_info: cert_info,
+            });
         }
     }
 
@@ -71,6 +104,7 @@ pub async fn grab_banner_with_db(
                 },
                 cpe: if db_match.cpe.is_empty() { None } else { Some(db_match.cpe) },
                 os_hint: db_match.os,
+                tls_info: None,
             });
         }
     }
@@ -139,8 +173,72 @@ async fn try_active_probes(
                     },
                     cpe: if db_match.cpe.is_empty() { None } else { Some(db_match.cpe) },
                     os_hint: db_match.os,
+                    tls_info: None,
                 });
             }
+        }
+    }
+
+    None
+}
+
+async fn try_tls_active_probes(
+    ip: IpAddr,
+    port: u16,
+    probe_timeout: Duration,
+    probes: &[&Probe],
+    matcher: &ServiceMatcher,
+) -> Option<ServiceInfo> {
+    for probe in probes {
+        if probe.payload.is_empty() {
+            continue;
+        }
+
+        let wait = Duration::from_millis(probe.total_wait_ms.min(probe_timeout.as_millis() as u64));
+
+        let result = tokio::time::timeout(wait, async {
+            tls::tls_probe_service(ip, port, &probe.payload, probe_timeout).await
+        }).await;
+
+        if let Ok(Ok((response, cert_info))) = result {
+            if response.is_empty() {
+                if cert_info.is_some() {
+                    return Some(ServiceInfo {
+                        service_name: "HTTPS".to_string(),
+                        version: None,
+                        banner: String::new(),
+                        confidence: Confidence::Medium,
+                        cpe: None,
+                        os_hint: None,
+                        tls_info: cert_info,
+                    });
+                }
+                continue;
+            }
+
+            let banner = String::from_utf8_lossy(&response).to_string();
+            debug!("TLS probe '{}' got {} bytes from {}:{}", probe.name, response.len(), ip, port);
+
+            if let Some(db_match) = matcher.match_banner(&banner, port) {
+                debug!("TLS probe '{}' matched: {} on {}:{}", probe.name, db_match.service_name, ip, port);
+                return Some(ServiceInfo {
+                    service_name: db_match.product.clone().unwrap_or(db_match.service_name.clone()),
+                    version: db_match.version.clone(),
+                    banner,
+                    confidence: match db_match.confidence {
+                        crate::service_db::Confidence::High => Confidence::High,
+                        crate::service_db::Confidence::Medium => Confidence::Medium,
+                        crate::service_db::Confidence::Low => Confidence::Low,
+                    },
+                    cpe: if db_match.cpe.is_empty() { None } else { Some(db_match.cpe) },
+                    os_hint: db_match.os,
+                    tls_info: cert_info,
+                });
+            }
+
+            let mut info = identify_service(port, &banner);
+            info.tls_info = cert_info;
+            return Some(info);
         }
     }
 
@@ -210,6 +308,7 @@ fn identify_service(port: u16, banner: &str) -> ServiceInfo {
             confidence: Confidence::Medium,
             cpe: None,
             os_hint: None,
+            tls_info: None,
         };
     }
 
@@ -221,6 +320,7 @@ fn identify_service(port: u16, banner: &str) -> ServiceInfo {
             confidence: Confidence::Medium,
             cpe: None,
             os_hint: None,
+            tls_info: None,
         };
     }
 
@@ -232,6 +332,7 @@ fn identify_service(port: u16, banner: &str) -> ServiceInfo {
             confidence: Confidence::Low,
             cpe: None,
             os_hint: None,
+            tls_info: None,
         };
     }
 
@@ -260,6 +361,7 @@ fn parse_ssh_banner(banner: &str) -> ServiceInfo {
         confidence: Confidence::High,
         cpe: None,
         os_hint: None,
+        tls_info: None,
     }
 }
 
@@ -303,6 +405,7 @@ fn parse_http_banner(banner: &str) -> ServiceInfo {
         confidence,
         cpe: None,
         os_hint: None,
+        tls_info: None,
     }
 }
 
@@ -330,6 +433,7 @@ fn parse_ftp_banner(banner: &str) -> ServiceInfo {
         confidence,
         cpe: None,
         os_hint: None,
+        tls_info: None,
     }
 }
 
@@ -353,6 +457,7 @@ fn parse_smtp_banner(banner: &str) -> ServiceInfo {
         confidence: Confidence::Medium,
         cpe: None,
         os_hint: None,
+        tls_info: None,
     }
 }
 
@@ -364,6 +469,7 @@ fn parse_mysql_banner(banner: &str) -> ServiceInfo {
         confidence: Confidence::Medium,
         cpe: None,
         os_hint: None,
+        tls_info: None,
     }
 }
 
@@ -396,6 +502,7 @@ fn identify_by_port(port: u16, banner: &str) -> ServiceInfo {
         confidence,
         cpe: None,
         os_hint: None,
+        tls_info: None,
     }
 }
 
@@ -464,6 +571,7 @@ mod tests {
             confidence: Confidence::High,
             cpe: Some(vec!["cpe:/a:nginx:nginx:1.18.0".to_string()]),
             os_hint: None,
+            tls_info: None,
         };
         assert!(info.cpe.is_some());
         assert_eq!(info.cpe.unwrap().len(), 1);
