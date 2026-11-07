@@ -102,13 +102,6 @@ Signatures TCP HttpRoot
 match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?"neo4j_version":"(\d+(?:\.\d+)*)",|s p/Neo4j/ v/$1/
 # END neo4j
 
-# BEGIN nextcloud
-# tested: nextcloud:35.0.0 nextcloud@sha256:23c101539e295aaf83888c9c1cae7df3fb6ce80b9ea9310248dad46af8c89936
-# tested: nextcloud:35.0.1 nextcloud@sha256:8f2f0e93aca5e9457019933936dea1f313052e72c696b4aecb31580a208b859f
-Signatures TCP HttpRoot
-match http m|^H.*?X-Permitted-Cross-Domain-Policies: none.*?<html class="ng-csp" data-placeholder-focus="false" lang="en" data-locale="en" translate="no" >|s p/Nextcloud/
-# END nextcloud
-
 # BEGIN nginx
 # tested: nginx:1.24.0 nginx@sha256:f6daac2445b0ce70e64d77442ccf62839f3f1b4c24bf6746a857eff014e798c8
 # tested: nginx:1.26.2 nginx@sha256:43a626425e38f1d80cd17303c5d44b5f5b22b8b10d0c0f1e50b047cf4e1ad5dd
@@ -407,3 +400,13 @@ match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?WordPress.*?/wp-includes/css/dashicons\
 Signatures TCP HttpRoot
 match http m|^H.*?Location: http://localhost/wp-admin/setup-config\.php|s p/WordPress/
 # END wordpress
+
+# BEGIN nextcloud
+# tested: nextcloud:35.0.0 nextcloud@sha256:23c101539e295aaf83888c9c1cae7df3fb6ce80b9ea9310248dad46af8c89936
+# tested: nextcloud:35.0.1 nextcloud@sha256:8f2f0e93aca5e9457019933936dea1f313052e72c696b4aecb31580a208b859f
+# tested: nextcloud:35.0.2 nextcloud@sha256:d88929dc8386420b8963f86cabb667fdaf733eef9dcf8fc98e226801a32c023c
+Signatures TCP HttpNextcloudStatus
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?\{"installed":.*?"versionstring":"(\d+(?:\.\d+)*)".*?"productname":"Nextcloud"|s p/Nextcloud/ v/$1/
+Signatures TCP HttpRoot
+match http m|^H.*?X-Permitted-Cross-Domain-Policies: none.*?<html class="ng-csp" data-placeholder-focus="false" lang="en" data-locale="en" translate="no" >|s p/Nextcloud/
+# END nextcloud
