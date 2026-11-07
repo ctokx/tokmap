@@ -20,3 +20,276 @@ match http m|^HTTP/\d+\.\d+ \d+ OK\r\nServer: Werkzeug/(\d+(?:\.\d+)*) Python/|s
 Signatures TCP HttpConsole
 match http m|^HTTP/\d+\.\d+ 200 OK\r\nServer: Werkzeug/(\d+(?:\.\d+)*) Python/[\d.]+\r\n.*?<title>Console // Werkzeug Debugger</title>|s p/Werkzeug/ v/$1/ i/debugger console exposed/
 # END werkzeug-debug
+
+# BEGIN caddy
+# tested: caddy:2.11.7 caddy@sha256:36c24ad91a7ff7bc4c87fe22bfa8df3c4b18da0773d73fc12ee2c52b98c0bb7e
+# tested: caddy:2.11.8 caddy@sha256:4fcafa98afd1c2e642e353e3c5cf9ddbe892fcee14bc990e7ba2c5b78e51f9cf
+Signatures TCP HttpMissing
+match http m|^HTTP/[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?Server: Caddy\r\n|s p/Caddy/
+# END caddy
+
+# BEGIN docker.dragonflydb.io/dragonflydb/dragonfly
+# tested: docker.dragonflydb.io/dragonflydb/dragonfly:v1.24.0 docker.dragonflydb.io/dragonflydb/dragonfly@sha256:9d7fbf70085b5bb13570e2a4019cc14e6bf74576eec339de89c6aeda7025c847
+# tested: docker.dragonflydb.io/dragonflydb/dragonfly:v1.25.1 docker.dragonflydb.io/dragonflydb/dragonfly@sha256:d40f3373dc65fa72a85df26194e99cd442bab741430e6c7f57456b0d7e2cdc88
+Signatures TCP RedisInfo
+match redis m|^.*?dragonfly_version:df-v(\d+(?:\.\d+)*)\r\n|s p/Dragonfly/ v/$1/
+Signatures TCP HttpMetrics
+match redis m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?dragonfly.*?version="df-v(\d+(?:\.\d+)*)"\} 1\n|s p/Dragonfly/ v/$1/
+# END docker.dragonflydb.io/dragonflydb/dragonfly
+
+# BEGIN getmeili/meilisearch
+# tested: getmeili/meilisearch:v1.10.3 getmeili/meilisearch@sha256:9d1b9b02fe6c68f60b54ce40092d8078f051b9341c400c90f907607636b7c9c1
+# tested: getmeili/meilisearch:v1.11.3 getmeili/meilisearch@sha256:6f8f1fc29d1ff67b4d8d503bb4e0a69b55c8d42600decafde951344218193a27
+# tested: getmeili/meilisearch:v1.12.0 getmeili/meilisearch@sha256:27f831c41cb735a9c2314b61a33a14552367af6b3e4bcf840f21fd0e64e37a8a
+Signatures TCP HttpVersion
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?"pkgVersion":"(\d+(?:\.\d+)*)"\}|s p/Meilisearch/ v/$1/
+# END getmeili/meilisearch
+
+# BEGIN ghcr.io/ferretdb/ferretdb
+# tested: ghcr.io/ferretdb/ferretdb:1.23.1 ghcr.io/ferretdb/ferretdb@sha256:c6184903baa70099f8763069315856049538597c41d67c834fc4a627f78525f5
+# tested: ghcr.io/ferretdb/ferretdb:1.24.0 ghcr.io/ferretdb/ferretdb@sha256:e4e442895ae2aaf8284db3d012c8d0e1c84d6f353d16678a0d3edf6d7e81d624
+Signatures TCP MongoBuildInfo
+match mongodb m|^.*?ferretdbVersion\x00\x08\x00\x00\x00v(\d+(?:\.\d+)*)\x00|s p/FerretDB/ v/$1/
+# END ghcr.io/ferretdb/ferretdb
+
+# BEGIN ghcr.io/microsoft/garnet
+# tested: ghcr.io/microsoft/garnet:1.0.44 ghcr.io/microsoft/garnet@sha256:20f12649eee74f196db8c4409954cb8a64a5dfb7dc979d8d8eee87d6e34a874a
+# tested: ghcr.io/microsoft/garnet:1.0.46 ghcr.io/microsoft/garnet@sha256:61e340a8a9dab242a36fa3b3647698360b98b057b0da91c1386871a09af2346b
+Signatures TCP RedisInfo
+match redis m|^\$\d+\r\n# Server\r\ngarnet_version:(\d+(?:\.\d+)*)\r\n|s p/Garnet/ v/$1/
+# END ghcr.io/microsoft/garnet
+
+# BEGIN gitea/gitea
+# tested: gitea/gitea:1.21.11 gitea/gitea@sha256:0056032dc8c6ab70583e4a105b9ee0dc72dce4f4fbc8022c98bcec46b0273883
+# tested: gitea/gitea:1.22.6 gitea/gitea@sha256:538658de667c5d098a274f2f63aa6ec891d88f670cdd5282cf27221ba747dda4
+Signatures TCP HttpRoot
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?gitea.*?ionEncoded: encodeURIComponent\('(\d+(?:\.\d+)*)'\),|s p/Gitea/ v/$1/
+# END gitea/gitea
+
+# BEGIN grafana/grafana
+# tested: grafana/grafana:11.2.2 grafana/grafana@sha256:d5133220d770aba5cb655147b619fa8770b90f41d8489a821d33b1cd34d16f89
+# tested: grafana/grafana:11.3.1 grafana/grafana@sha256:fa801ab6e1ae035135309580891e09f7eb94d1abdbd2106bdc288030b028158c
+Signatures TCP HttpApiHealth
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?\r\n\r\n\{\n  "database": "\w+",\n  "version": "(\d+(?:\.\d+)*)",\n  "commit": "|s p/Grafana/ v/$1/
+# END grafana/grafana
+
+# BEGIN httpd
+# tested: httpd:2.4.67 httpd@sha256:2a7deaaaf357261a1dffcb8fc725f4aaba2af95fbde1a40a68bca7cb0f03594e
+# tested: httpd:2.4.68 httpd@sha256:03f858efb82c25cb0f9962946615cdcdaf26927cb971722149b563197cfd0fdd
+Signatures TCP HttpRoot
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?Server: Apache/(\d+(?:\.\d+)*) \(Unix\)\r|s p/Apache httpd/ v/$1/
+Signatures TCP TlsClientHello
+match http m|^.*?Server: Apache/(\d+(?:\.\d+)*) \(Unix\)\r|s p/Apache httpd/ v/$1/
+Signatures TCP HttpMissing
+match http m|^HTTP/\d+\.\d+ \d+ Not Found\r\n.*?Server: Apache/(\d+(?:\.\d+)*) \(Unix\)\r|s p/Apache httpd/ v/$1/
+# END httpd
+
+# BEGIN influxdb
+# tested: influxdb:2.8.0 influxdb@sha256:e6d293bedc5800bc5f7f61af6335d90a355c78be88fa41e591431ff44df553a5
+# tested: influxdb:2.9.0 influxdb@sha256:05ea1901ea421acf031b74e65b737fc911500e7f61189380596f84da18963fd1
+Signatures TCP HttpRoot
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?X-Influxdb-Version: v(\d+(?:\.\d+)*)\r\n|s p/InfluxDB/ v/$1/
+Signatures TCP HttpHead
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?X-Influxdb-Version: v(\d+(?:\.\d+)*)\r\n|s p/InfluxDB/ v/$1/
+Signatures TCP HttpMissing
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?X-Influxdb-Version: v(\d+(?:\.\d+)*)\r\n|s p/InfluxDB/ v/$1/
+# END influxdb
+
+# BEGIN mariadb
+# tested: mariadb:12.3.2 mariadb@sha256:a02fe89cb597d4375812b2eac90cf9d0775d4686daa7f7cc750ebbcad7525bbc
+# tested: mariadb:12.3.3 mariadb@sha256:d46e102fa8b9b72bfcdeb56f9dd538742092119dc8b11f31fe662605cd234cd9
+Signatures TCP Empty
+match mysql m|^Z\x00\x00\x00\n(\d+(?:\.\d+)*)-MariaDB|s p/MariaDB/ v/$1/
+Signatures TCP HttpRoot
+match mysql m|^Z\x00\x00\x00\n(\d+(?:\.\d+)*)-MariaDB|s p/MariaDB/ v/$1/
+Signatures TCP Lines
+match mysql m|^Z\x00\x00\x00\n(\d+(?:\.\d+)*)-MariaDB|s p/MariaDB/ v/$1/
+# END mariadb
+
+# BEGIN memcached
+# tested: memcached:1.6.43 memcached@sha256:983a925a6f47ffcce7adfe00e5f16b229af7311f4d418ae5cd8efd93f0246ae4
+# tested: memcached:1.6.44 memcached@sha256:deae07c1fce831887ffb24f5cc68cde691916c31782746bd994635b0ec3b90bb
+Signatures TCP MemcachedVersion
+match memcached m|^VERSION (\d+(?:\.\d+)*)\r\n|s p/memcached/ v/$1/
+# END memcached
+
+# BEGIN mongo
+# tested: mongo:8.3.13 mongo@sha256:e16e606f792ea89d2b4907b54e5e31eb86a7a23e27231dce3a982cc8f2d73cd2
+# tested: mongo:9.0.2 mongo@sha256:f5c6240ae8fccc21cf75acc6462929b3394a7a5a7abd934b6b0e7ada5eb5fe95
+Signatures TCP MongoBuildInfo
+match mongodb m|^(?=.*?tcmalloc-google)(?=.*?wiredTiger).*?\x00\x00\x00(\d+(?:\.\d+)*)\x00|s p/MongoDB/ v/$1/
+# END mongo
+
+# BEGIN mysql
+# tested: mysql:26.7.0 mysql@sha256:625f74ddf93652d9d0f8d4ea7d741b9189554a5e96d27bb770abd0902d89c6e3
+# tested: mysql:9.7.4 mysql@sha256:df90258da46f6e7ff8574ff84f17618aba0765cac749928299c69fd4e7cb8ad8
+Signatures TCP Empty
+match mysql m|^(?=.*?caching_sha2_password).*?\x00\x00\x00\n(\d+(?:\.\d+)*)\x00|s p/MySQL/ v/$1/
+Signatures TCP HttpRoot
+match mysql m|^(?=.*?caching_sha2_password).*?\x00\x00\x00\n(\d+(?:\.\d+)*)\x00|s p/MySQL/ v/$1/
+Signatures TCP Lines
+match mysql m|^(?=.*?caching_sha2_password).*?\x00\x00\x00\n(\d+(?:\.\d+)*)\x00|s p/MySQL/ v/$1/
+# END mysql
+
+# BEGIN neo4j
+# tested: neo4j:5.24.2 neo4j@sha256:2e7e4eea5bc1eec581a3097c018dfeb3747f3638e67a963c10554825c31c1425
+# tested: neo4j:5.25.1 neo4j@sha256:ca5da0c4cb596a9e9097aad8c79c10156f0c6261faa2ddcc74183a1e552554ed
+Signatures TCP HttpRoot
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?"neo4j_version":"(\d+(?:\.\d+)*)",|s p/Neo4j/ v/$1/
+# END neo4j
+
+# BEGIN nextcloud
+# tested: nextcloud:35.0.0 nextcloud@sha256:23c101539e295aaf83888c9c1cae7df3fb6ce80b9ea9310248dad46af8c89936
+# tested: nextcloud:35.0.1 nextcloud@sha256:8f2f0e93aca5e9457019933936dea1f313052e72c696b4aecb31580a208b859f
+Signatures TCP HttpRoot
+match http m|^H.*?X-Permitted-Cross-Domain-Policies: none.*?<html class="ng-csp" data-placeholder-focus="false" lang="en" data-locale="en" translate="no" >|s p/Nextcloud/
+# END nextcloud
+
+# BEGIN nginx
+# tested: nginx:1.24.0 nginx@sha256:f6daac2445b0ce70e64d77442ccf62839f3f1b4c24bf6746a857eff014e798c8
+# tested: nginx:1.26.2 nginx@sha256:43a626425e38f1d80cd17303c5d44b5f5b22b8b10d0c0f1e50b047cf4e1ad5dd
+# tested: nginx:1.27.3 nginx@sha256:bc2f6a7c8ddbccf55bdb19659ce3b0a92ca6559e86d42677a5a02ef6bda2fcef
+# tested: nginx:1.31.6 nginx@sha256:60f0d4e986561e08804f75c211dcaf7fc5455699eada29f42cbe8a0a7253dd86
+# tested: nginx:1.31.7 nginx@sha256:8632b3314d74c61f0e27f59055bab13f7793b988c94c090154d867bc29e0f39b
+Signatures TCP TlsClientHello
+match http m|^HTTP/\d+\.\d+ \d+ Bad Request.*?Server: nginx/(\d+(?:\.\d+)*)\r\n|s p/nginx/ v/$1/
+Signatures TCP HttpRoot
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\nServer: nginx/(\d+(?:\.\d+)*)\r\n|s p/nginx/ v/$1/
+Signatures TCP HttpMissing
+match http m|^HTTP/\d+\.\d+ \d+ Not Found\r\nServer: nginx/(\d+(?:\.\d+)*)\r\n|s p/nginx/ v/$1/
+# END nginx
+
+# BEGIN ollama/ollama
+# tested: ollama/ollama:0.4.7 ollama/ollama@sha256:55977eb618082df0f81ea197a75dc1710e54524f2ef71fa1a8b83cc0148b6e2f
+# tested: ollama/ollama:0.5.4 ollama/ollama@sha256:18bfb1d605604fd53dcad20d0556df4c781e560ebebcd923454d627c994a0e37
+Signatures TCP HttpApiVersion
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?\r\n\r\n\{"version":"(\d+(?:\.\d+)*)[^"]*"\}$|s p/Ollama/ v/$1/
+Signatures TCP HttpRoot
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?\r\n\r\nOllama is running$|s p/Ollama/
+# END ollama/ollama
+
+# BEGIN opensearchproject/opensearch
+# tested: opensearchproject/opensearch:2.17.1 opensearchproject/opensearch@sha256:1193b7c29c5d63028523728243cc4da047ac49f697a8f8105e5aeee2f89bcc4c
+# tested: opensearchproject/opensearch:2.18.0 opensearchproject/opensearch@sha256:7f6fa1efee8f39e94ca30a0a31f95d866c8a99f25a86e6cf6691142d1eab4f9e
+Signatures TCP HttpRoot
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?opensearch.*?    "number" : "(\d+(?:\.\d+)*)",|s p/OpenSearch/ v/$1/
+# END opensearchproject/opensearch
+
+# BEGIN postgres
+# tested: postgres:15.10 postgres@sha256:d609c3005478af92bddad773423df829b7402ea0b356d5b72edd2fd54d1ad3ea
+# tested: postgres:15.14 postgres@sha256:822f8795764a670160640888508b2a68ea5c4b045012c2de17e1d0447bdbdc99
+# tested: postgres:15.15 postgres@sha256:98fe06b500b5eb29e45bf8c073eb0ca399790ce17b1d586448edc4203627d342
+# tested: postgres:15.16 postgres@sha256:2bc89eed5490967e6b1fa5175d84cb45d65f19fbb8973c7b23450dea785b9505
+# tested: postgres:15.17 postgres@sha256:32016c79bea24c14917660106bc23a03341d94b9983aeb41f4130b4f3fbd6dd0
+# tested: postgres:15.18 postgres@sha256:6eb0add3b77c081df18aa518ce43df58fdcc40f2e6d868a6fd08038dc7acd425
+# tested: postgres:15.19 postgres@sha256:1aac5b49cefd627f02816141ca4ad012d6cc19460dfe02a9b5168a105be3fc53
+# tested: postgres:16.10 postgres@sha256:21f6013073bc6b92830a2129570e2f5ec42a6c734b5a985a41e83aa58f54c3c1
+# tested: postgres:16.11 postgres@sha256:468e1f126ca5af849799cda06ac9b03d8090aae9fa5163408b3e8da44fad0702
+# tested: postgres:16.12 postgres@sha256:23af655ba1ddf74eaa002e3deaf5fce022ab8791672336a7c1fb0ef2d57efb7f
+# tested: postgres:16.13 postgres@sha256:5d143123fdf80462d1778cd4f24b9f7ca13c87174bca19141fb194c5a1ebca59
+# tested: postgres:16.14 postgres@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+# tested: postgres:16.15 postgres@sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657
+# tested: postgres:16.6 postgres@sha256:557fea37a744d5f4c8faab304b0a90858b53ab119735a88c131fd19dab802f36
+# tested: postgres:17.10 postgres@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
+# tested: postgres:17.11 postgres@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
+# tested: postgres:17.6 postgres@sha256:00bc86618629af00d2937fdc5a5d63db3ff8450acf52f0636ec813c7f4902929
+# tested: postgres:17.7 postgres@sha256:2006493727bd5277eece187319af1ef82b4cf82cf4fc1ed00da0775b646ac2a4
+# tested: postgres:17.8 postgres@sha256:69dddb030ab69d669d8d7c6abf67aeb448178e5270d5f123a21f4f7ac8b46a24
+# tested: postgres:17.9 postgres@sha256:2a0d0fe14825b0939f78a8cad5cd4e6aa68bf94d0e5dd96e24b6d23af4315545
+# tested: postgres:18.0 postgres@sha256:41fc5342eefba6cc2ccda736aaf034bbbb7c3df0fdb81516eba1ba33f360162c
+# tested: postgres:18.1 postgres@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f
+# tested: postgres:18.2 postgres@sha256:a688ae5c99f86c1424e046ace0de890608cc0ddb5ec8ef72a6ff8305fdc8f4d2
+# tested: postgres:18.3 postgres@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
+# tested: postgres:18.4 postgres@sha256:a02db8cac496f15b094798a38254f14d6e00741f709360e5e00bb6668ea31636
+# tested: postgres:18.6 postgres@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42
+Signatures TCP KafkaApiVersions
+match postgresql m|^E(?=.*?[\x00\r\n]L2145[\x00\r\n]).*?VFATAL.*?RProcessStartupPacket|s p/PostgreSQL/ v/16.6 or earlier/
+match postgresql m|^E(?=.*?[\x00\r\n]L2147[\x00\r\n]).*?VFATAL.*?RProcessStartupPacket|s p/PostgreSQL/ v/16.10/
+match postgresql m|^E(?=.*?[\x00\r\n]L2149[\x00\r\n]).*?VFATAL.*?RProcessStartupPacket|s p/PostgreSQL/ v/16.11-16.13/
+match postgresql m|^E(?=.*?[\x00\r\n]L2169[\x00\r\n]).*?VFATAL.*?RProcessStartupPacket|s p/PostgreSQL/ v/16.14 or later/
+match postgresql m|^E(?=.*?[\x00\r\n]L2198[\x00\r\n]).*?VFATAL.*?RProcessStartupPacket|s p/PostgreSQL/ v/15.10 or earlier/
+match postgresql m|^E(?=.*?[\x00\r\n]L2200[\x00\r\n]).*?VFATAL.*?RProcessStartupPacket|s p/PostgreSQL/ v/15.14/
+match postgresql m|^E(?=.*?[\x00\r\n]L2202[\x00\r\n]).*?VFATAL.*?RProcessStartupPacket|s p/PostgreSQL/ v/15.15-15.17/
+match postgresql m|^E(?=.*?[\x00\r\n]L2222[\x00\r\n]).*?VFATAL.*?RProcessStartupPacket|s p/PostgreSQL/ v/15.18 or later/
+match postgresql m|^E(?=.*?[\x00\r\n]L679[\x00\r\n]).*?VFATAL.*?RProcessStartupPacket|s p/PostgreSQL/ v/17.9 or earlier/
+match postgresql m|^E(?=.*?[\x00\r\n]L698[\x00\r\n]).*?VFATAL.*?RProcessStartupPacket|s p/PostgreSQL/ v/17.10/
+match postgresql m|^E(?=.*?[\x00\r\n]L703[\x00\r\n]).*?VFATAL.*?RProcessStartupPacket|s p/PostgreSQL/ v/17.11 or later/
+match postgresql m|^E(?=.*?[\x00\r\n]L707[\x00\r\n]).*?VFATAL.*?RProcessStartupPacket|s p/PostgreSQL/ v/18.3 or earlier/
+match postgresql m|^E(?=.*?[\x00\r\n]L726[\x00\r\n]).*?VFATAL.*?RProcessStartupPacket|s p/PostgreSQL/ v/18.4/
+match postgresql m|^E(?=.*?[\x00\r\n]L731[\x00\r\n]).*?VFATAL.*?RProcessStartupPacket|s p/PostgreSQL/ v/18.6 or later/
+match postgresql m|^E.*?VFATAL.*?RProcessStartupPacket|s p/PostgreSQL/
+# END postgres
+
+# BEGIN prom/prometheus
+# tested: prom/prometheus:v2.55.1 prom/prometheus@sha256:2659f4c2ebb718e7695cb9b25ffa7d6be64db013daba13e05c875451cf51b0d3
+# tested: prom/prometheus:v3.0.1 prom/prometheus@sha256:565ee86501224ebbb98fc10b332fa54440b100469924003359edf49cbce374bd
+Signatures TCP HttpVersion
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?\r\n\r\n\{"version":"(\d+(?:\.\d+)*)","revision":"[0-9a-f]{40}","branch":"[^"]*","buildUser":"[^"]*","buildDate":"[^"]*","goVersion":"go|s p/Prometheus/ v/$1/
+# END prom/prometheus
+
+# BEGIN qdrant/qdrant
+# tested: qdrant/qdrant:v1.11.5 qdrant/qdrant@sha256:7a4788934788a7ed9cbf6b8cc3ca1ee880dcd969cf8c6639dc7d0e446cbd4b47
+# tested: qdrant/qdrant:v1.12.4 qdrant/qdrant@sha256:241edb9d7778327516ef218f8c74e1bd61b5ea42cd4f193cb8d0896199705636
+Signatures TCP HttpRoot
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?qdrant.*?"version":"(\d+(?:\.\d+)*)",|s p/Qdrant/ v/$1/
+Signatures TCP HttpMetrics
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?qdrant.*?version="(\d+(?:\.\d+)*)"\} 1\n|s p/Qdrant/ v/$1/
+# END qdrant/qdrant
+
+# BEGIN quay.io/coreos/etcd
+# tested: quay.io/coreos/etcd:v3.5.16 quay.io/coreos/etcd@sha256:d967d98a12dc220a1a290794711dba7eba04b8ce465e12b02383d1bfbb33e159
+# tested: quay.io/coreos/etcd:v3.5.17 quay.io/coreos/etcd@sha256:a055da833a7c013b836ed0822e8ec1f99b059658be255ad8d0fcd31b635ae3d6
+Signatures TCP HttpVersion
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?"etcdserver":"(\d+(?:\.\d+)*)",|s p/etcd/ v/$1/
+# END quay.io/coreos/etcd
+
+# BEGIN rabbitmq
+# tested: rabbitmq:4.3.6 rabbitmq@sha256:3e5cc23235b0eb850f604e8ace10d9a9b6d05be3e36730e53522ee9ead707a9e
+# tested: rabbitmq:4.3.7 rabbitmq@sha256:2afee120d039c78a16c930036ac47568ed7fc45dabdc56fc3d890d2d9273ac49
+Signatures TCP Amqp091
+match amqp m|^.*?RabbitMQ.*?versionS\x00\x00\x00\x05(\d+(?:\.\d+)*)\x00|s p/RabbitMQ/ v/$1/
+# END rabbitmq
+
+# BEGIN registry
+# tested: registry:3.1.0 registry@sha256:8a7c1aae9db5028cbc1cfe83e5969d270a50e8bc0b72eef3cc5657542ec383c9
+# tested: registry:3.1.1 registry@sha256:325b4b29b041e82803abeb703e201655e4e23ab83264ec1a7c9ddb0a5b14a6e0
+Signatures TCP HttpMissing
+match http m|^HTTP/[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?Docker-Distribution-Api-Version: registry/2\.0\r\n|s p/Docker Registry/
+# END registry
+
+# BEGIN surrealdb/surrealdb
+# tested: surrealdb/surrealdb:v2.0.4 surrealdb/surrealdb@sha256:88c3fab9a0d7dbace30ee19ee2f437133cfa23861873847a188f72cad1699390
+# tested: surrealdb/surrealdb:v2.1.4 surrealdb/surrealdb@sha256:51769e7578580549a988621cd4699408c118127991a0a5b9ce8b485e7af7ae33
+Signatures TCP HttpRoot
+match http m|^HTTP/\d+\.\d+ \d+ Temporary R.*?surreal-version: surrealdb-(\d+(?:\.\d+)*)\r\n|s p/SurrealDB/ v/$1/
+Signatures TCP HttpMissing
+match http m|^HTTP/\d+\.\d+ \d+ Not Found\r\n.*?surreal-version: surrealdb-(\d+(?:\.\d+)*)\r\n|s p/SurrealDB/ v/$1/
+Signatures TCP HttpHead
+match http m|^HTTP/\d+\.\d+ \d+ Temporary R.*?surreal-version: surrealdb-(\d+(?:\.\d+)*)\r\n|s p/SurrealDB/ v/$1/
+# END surrealdb/surrealdb
+
+# BEGIN tomcat
+# tested: tomcat:10.1.61 tomcat@sha256:25faef1c4511da46b059ae2afc778461f248bf942b9fc4cdd445b65dc7daf49a
+# tested: tomcat:9.0.123 tomcat@sha256:3f58672d56a92628d88b74e221150680120f17b7b973446736175f420d5c9ff3
+Signatures TCP HttpRoot
+match http m|^HTTP/\d+\.\d+ \d+ \r\n.*?lass="line" /><h3>Apache Tomcat/(\d+(?:\.\d+)*)</h3></b|s p/Apache Tomcat/ v/$1/
+Signatures TCP TlsClientHello
+match http m|^HTTP/\d+\.\d+ \d+ \r\n.*?lass="line" /><h3>Apache Tomcat/(\d+(?:\.\d+)*)</h3></b|s p/Apache Tomcat/ v/$1/
+Signatures TCP HttpMissing
+match http m|^HTTP/\d+\.\d+ \d+ \r\n.*?lass="line" /><h3>Apache Tomcat/(\d+(?:\.\d+)*)</h3></b|s p/Apache Tomcat/ v/$1/
+# END tomcat
+
+# BEGIN valkey/valkey
+# tested: valkey/valkey:7.2.7 valkey/valkey@sha256:6954650f4f9679d3773c13de9b7404e92838421870901b83c677c14b1254872f
+# tested: valkey/valkey:8.0.2 valkey/valkey@sha256:57bcc49c6ade1813ef25206c571b65b66bb0094235ff7fb767941622892297d9
+# tested: valkey/valkey:8.1.0 valkey/valkey@sha256:4a53d3f718befc72bdcd4051e63daec3be3f682b2a7d61228a5593bd6b42be57
+Signatures TCP RedisInfo
+match redis m|^.*?valkey_version:(\d+(?:\.\d+)*)\r\n|s p/Valkey/ v/$1/
+# END valkey/valkey
+
+# BEGIN wordpress
+# tested: wordpress:7.1.2 wordpress@sha256:e04cf657f24889e96b5544828cdd5a92a0b51819f3e1899183f9be6ea0485edf
+# tested: wordpress:7.1.3 wordpress@sha256:8901759bfbb7ebc567dbc44a244c0d96d720d0a67c17bc4f42ec355ddba2e863
+Signatures TCP HttpRoot
+match http m|^H.*?Location: http://localhost/wp-admin/setup-config\.php|s p/WordPress/
+# END wordpress
