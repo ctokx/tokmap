@@ -663,11 +663,14 @@ def first_claiming_block(entry, text):
     are tried in file order, so a specific product (Valkey) must come ahead of a general one
     that also matches it (Redis), or the general one would name it."""
     mine = [p for p in all_recording_files() if p.parent.parent.name == slug(entry["image"])]
+    baseline = replay([PROBES], mine)  # the probes file's own generic matches, such as TLS
     for m in BLOCK.finditer(text):
         with tempfile.NamedTemporaryFile("w", suffix=".matches", delete=False, encoding="utf8") as f:
             f.write(m.group(0))
         try:
-            if any(r["match"] and r["match"].get("product") != entry["product"] for r in replay([PROBES, f.name], mine)):
+            results = replay([PROBES, f.name], mine)
+            if any(r["match"] and r != b and r["match"].get("product") != entry["product"]
+                   for r, b in zip(results, baseline)):
                 return m.group(1)
         finally:
             os.unlink(f.name)
