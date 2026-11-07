@@ -182,11 +182,97 @@ def probe_rarities(text):
     return rarities
 
 
-def draft_signature(entry, evidence, rarities=None):
+TOKEN_SPLIT = re.compile(rb"[\x00\r\n]+")
+MIN_MARKER = 6
+MAX_MARKERS = 2
+
+
+def tokens(data: bytes):
+    """Printable runs between NULs and line breaks: the fields of most replies."""
+    return [t for t in TOKEN_SPLIT.split(data) if t and all(32 <= b < 127 for b in t)]
+
+
+def markers(samples, others):
+    """Up to two strings in every reply of this product and in no other product's replies,
+    in the order they appear, such as source file and function names in an error."""
+    shared = set(tokens(samples[0][1]))
+    for _, data in samples[1:]:
+        shared &= set(tokens(data))
+    unique = [t for t in shared if len(t) >= MIN_MARKER and not any(t in other for other in others)]
+    # Strings without digits change least between versions.
+    chosen = sorted(unique, key=lambda t: (any(48 <= b <= 57 for b in t), -len(t)))[:MAX_MARKERS]
+    chosen.sort(key=lambda t: samples[0][1].find(t))
+    for _, data in samples:
+        at = [data.find(t) for t in chosen]
+        if at != sorted(at):
+            return []
+    return chosen
+
+
+def numbered_fields(data: bytes):
+    """{prefix: number} for fields made of a short label and a number, such as L2145."""
+    found = {}
+    for token in tokens(data):
+        m = re.fullmatch(rb"([A-Za-z_]{1,12}[:=]?)(\d{2,})", token)
+        if m:
+            found.setdefault(m.group(1), set()).add(m.group(2))
+    return {prefix: values.pop() for prefix, values in found.items() if len(values) == 1}
+
+
+def version_key(version):
+    return tuple(int(x) for x in re.findall(r"\d+", version))
+
+
+def version_text(versions, all_versions):
+    """`16.10-16.15` when no other recorded version falls between, else a list."""
+    ordered = sorted(versions, key=version_key)
+    if len(ordered) == 1:
+        return ordered[0]
+    low, high = version_key(ordered[0]), version_key(ordered[-1])
+    between = [v for v in all_versions if low <= version_key(v) <= high]
+    return f"{ordered[0]}-{ordered[-1]}" if sorted(between) == sorted(ordered) else ", ".join(ordered)
+
+
+def version_table(samples):
+    """{field value: versions} for a numbered field that differs between versions, or {}.
+    Source line numbers in error replies change when the file changes between releases."""
+    fields = [numbered_fields(data) for _, data in samples]
+    prefixes = set(fields[0])
+    for f in fields[1:]:
+        prefixes &= set(f)
+    best = {}
+    for prefix in prefixes:
+        table = {}
+        for (version, _), f in zip(samples, fields):
+            table.setdefault(prefix + f[prefix], set()).add(version)
+        if 1 < len(table) and len(table) > len(best):
+            best = table
+    return best
+
+
+def table_lines(samples, others, start_byte):
+    """(pattern, version text) pairs for a version table, then the product-only pattern."""
+    found = markers(samples, others)
+    if not found:
+        return []
+    head = f"^{escape(start_byte)}"
+    rest = "".join(f".*?{escape(m)}" for m in found)
+    edge = r"[\x00\r\n]"
+    table = version_table(samples)
+    all_versions = [v for v, _ in samples]
+    lines = [(f"{head}(?=.*?{edge}{escape(value)}{edge}){rest}", version_text(versions, all_versions))
+             for value, versions in sorted(table.items())]
+    return lines + [(f"{head}{rest}", None)]
+
+
+def draft_signature(entry, evidence, rarities=None, others=()):
     """Signatures for one image, from {tag: [recordings]}, as file text, or None.
 
-    Prefers the probes sent most often, and keeps a few, so the product is still named
-    when one reply differs in a real deployment."""
+    In order of preference: a pattern that reads the version from the reply, a table that
+    maps a numbered field to versions, then the product alone. Prefers probes sent most
+    often, and keeps a few versioned patterns, so the product is still named when one reply
+    differs in a real deployment. `others` holds other products' replies, so identifying
+    strings can be checked to be unique."""
     rarities = rarities or {}
     groups = {}
     for tag, recordings in evidence.items():
@@ -206,11 +292,17 @@ def draft_signature(entry, evidence, rarities=None):
         if pattern:
             # Patterns that name the product rank first: they are least likely to match others.
             nameless = not any(n.lower() in pattern.lower() for n in product_names)
-            candidates.append((0, nameless, rarity, -len(pattern), protocol, probe, pattern, True))
+            candidates.append((0, nameless, rarity, -len(pattern), protocol, probe, [(pattern, "$1")]))
+            continue
+        start = common_prefix([data for _, data in samples])[:1]
+        lines = table_lines(samples, others, start) if start else []
+        if len(lines) > 1:
+            candidates.append((1, False, rarity, -len(lines), protocol, probe, lines))
             continue
         pattern = product_pattern(samples, product_names + [entry["service"]])
-        if pattern:
-            candidates.append((1, False, rarity, -len(pattern), protocol, probe, pattern, False))
+        if pattern or lines:
+            chosen = [(pattern, None)] if pattern else lines
+            candidates.append((2, False, rarity, -len(chosen[0][0]), protocol, probe, chosen))
     if not candidates:
         return None
 
@@ -218,9 +310,11 @@ def draft_signature(entry, evidence, rarities=None):
     kind = candidates[0][0]
     keep = MAX_SIGNATURES if kind == 0 else 1
     text = f"# Draft for {entry['image']} from tags {', '.join(sorted(evidence))}. Not verified.\n"
-    for *_, protocol, probe, pattern, has_version in [c for c in candidates if c[0] == kind][:keep]:
-        info = f" {field('p', entry['product'])}" + (" v/$1/" if has_version else "")
-        text += f"Signatures {protocol} {probe}\nmatch {entry['service']} m|{pattern}|s{info}\n"
+    for *_, protocol, probe, lines in [c for c in candidates if c[0] == kind][:keep]:
+        text += f"Signatures {protocol} {probe}\n"
+        for pattern, version in lines:
+            info = f" {field('p', entry['product'])}" + (f" {field('v', version)}" if version else "")
+            text += f"match {entry['service']} m|{pattern}|s{info}\n"
     return text
 
 
@@ -361,7 +455,8 @@ def replay(signature_files, recording_files):
 
 
 def all_recording_files():
-    return sorted(EVIDENCE.glob("*/*/recordings.jsonl"))
+    # A capture still in progress has replies but no meta.json yet.
+    return sorted(p for p in EVIDENCE.glob("*/*/recordings.jsonl") if (p.parent / "meta.json").exists())
 
 
 def identify(matches):
@@ -373,6 +468,16 @@ def identify(matches):
     if not found:
         return None, None, None
     return found[0].get("product") or found[0]["service_name"], found[0].get("version"), found[0].get("info")
+
+
+def version_matches(found, truth):
+    """Exact, or a range `a-b` or list `a, b` that contains the true version."""
+    if not found or not truth:
+        return found == truth
+    if found == truth or truth in [v.strip() for v in found.split(",")]:
+        return True
+    m = re.fullmatch(r"([\d.]+)-([\d.]+)", found)
+    return bool(m) and version_key(m.group(1)) <= version_key(truth) <= version_key(m.group(2))
 
 
 def judge(results, signature_product):
@@ -392,7 +497,8 @@ def judge(results, signature_product):
         report.append({"image": meta["image"], "tag": meta["tag"],
                        "expected": [meta["product"], meta["version"], expected_info],
                        "found": [product, version, info], "product_ok": product == meta["product"],
-                       "version_ok": version == meta["version"], "info_ok": info == expected_info})
+                       "version_ok": version_matches(version, meta["version"]),
+                       "version_exact": version == meta["version"], "info_ok": info == expected_info})
     return report, false_positives
 
 
@@ -415,7 +521,10 @@ def check_block(entry, block, recordings):
         report, false_positives = judge(replay([PROBES, VERIFIED, f.name], recordings), entry["product"])
     finally:
         os.unlink(f.name)
-    has_version = "v/$1/" in block
+    # Recorded tags the entry does not list are held out for testing, so they must not
+    # decide which signatures are kept.
+    report = [r for r in report if r["image"] != entry["image"] or r["tag"] in entry["tags"]]
+    has_version = re.search(r"\sv[/|%]", block) is not None
     mine = [r for r in report if r["image"] == entry["image"] and r["product_ok"]]
     problems = [f"{r['tag']}: expected {r['expected']}, found {r['found']}"
                 for r in mine if (has_version and not r["version_ok"]) or not r["info_ok"]]
@@ -516,8 +625,14 @@ def main():
     elif args.command == "draft":
         DRAFTS.mkdir(exist_ok=True)
         rarities = probe_rarities(PROBES.read_text(encoding="utf8"))
+        replies = {path.parent.parent.name: [] for path in all_recording_files()}
+        for path in all_recording_files():
+            for line in path.read_text(encoding="utf8").splitlines():
+                if line.strip():
+                    replies[path.parent.parent.name].append(bytes.fromhex(json.loads(line)["response_hex"]))
         for entry in images:
-            text = draft_signature(entry, listed_evidence(entry), rarities)
+            others = [reply for image, found in replies.items() if image != slug(entry["image"]) for reply in found]
+            text = draft_signature(entry, listed_evidence(entry), rarities, others)
             if text:
                 (DRAFTS / f"{slug(entry['image'])}.matches").write_text(text, encoding="utf8", newline="\n")
             print(f"  {entry['image']}: {'drafted' if text else 'no clear signature, needs a hand-written draft'}")

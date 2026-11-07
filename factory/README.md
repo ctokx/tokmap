@@ -52,9 +52,19 @@ Add an entry to `images.json`:
 
 Use at least two tags, so the draft can tell the version apart from the text around it.
 
+## What the drafter looks for
+
+In order of preference:
+
+1. **The version in the reply**, such as `Server: nginx/1.27.3`. When the product's name appears earlier in the reply, the pattern requires it.
+2. **A version table.** Some replies carry a numbered field that changes between releases without being the version, such as the source line in a PostgreSQL error (`L2145`). The drafter maps each value to the versions that produced it, and the signature reports that version or range, such as `16.10-16.15`. It needs identifying strings (below), and the more releases recorded, the narrower the ranges.
+3. **The product alone**, from a shared start that names the product, or from identifying strings: text in every recorded version's reply and in no other image's recordings, such as `postmaster.c` and `ProcessStartupPacket`. Strings without digits are preferred, since they change least between versions.
+
+Identifying strings are only as unique as the recordings they were checked against, so they get more trustworthy as more images are recorded.
+
 ## When no draft comes out
 
-The drafter only handles clear cases: a version visible in the reply, or a reply that names the product. For anything else, write the draft by hand in `factory/drafts/IMAGE.matches`, using the same format, then run `verify`. AI assistance is fine here. `verify` is the gate either way.
+The drafter only handles the cases above. For anything else, write the draft by hand in `factory/drafts/IMAGE.matches`, using the same format, then run `verify`. AI assistance is fine here. `verify` is the gate either way.
 
 ```
 Signatures TCP RedisInfo

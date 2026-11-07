@@ -1,7 +1,8 @@
 import re
 import unittest
 
-from factory import (draft_signature, escape, names_product, probe_rarities, product_pattern, split_blocks,
+from factory import (draft_signature, escape, markers, names_product, probe_rarities, product_pattern, split_blocks,
+                     table_lines, version_matches, version_table, version_text,
                      version_of, versioned_pattern)
 
 REDIS = {"image": "redis", "service": "redis", "product": "Redis", "tags": []}
@@ -84,6 +85,38 @@ class DraftTests(unittest.TestCase):
         named = 'Signatures TCP X\nmatch http m|ollama.*?"version":"(\\d+)"|s p/Ollama/ v/$1/\n'
         self.assertFalse(names_product(nameless, entry))
         self.assertTrue(names_product(named, entry))
+
+    def pg_error(self, line):
+        body = (b"SFATAL\x00VFATAL\x00C0A000\x00Munsupported frontend protocol 65535.0\x00"
+                b"Fpostmaster.c\x00L" + str(line).encode() + b"\x00RProcessStartupPacket\x00\x00")
+        return b"E\x00\x00\x00" + bytes([len(body) + 4]) + body
+
+    def test_markers_are_shared_by_every_version_and_absent_elsewhere(self):
+        samples = [("16.6", self.pg_error(2145)), ("15.10", self.pg_error(2198))]
+        others = [b"-ERR unknown command 'FATAL'", b"HTTP/1.1 400 Bad Request\r\n\r\nunsupported frontend protocol"]
+        found = markers(samples, others)
+        self.assertIn(b"RProcessStartupPacket", found)
+        self.assertNotIn(b"L2145", found)
+
+    def test_version_table_maps_a_numbered_field_to_versions(self):
+        samples = [("16.4", self.pg_error(2145)), ("16.6", self.pg_error(2145)), ("15.10", self.pg_error(2198))]
+        self.assertEqual(version_table(samples), {b"L2145": {"16.4", "16.6"}, b"L2198": {"15.10"}})
+
+    def test_version_ranges_name_only_contiguous_versions(self):
+        everything = ["16.4", "16.5", "16.6", "17.0"]
+        self.assertEqual(version_text({"16.4", "16.5", "16.6"}, everything), "16.4-16.6")
+        self.assertEqual(version_text({"16.4", "17.0"}, everything), "16.4, 17.0")
+        self.assertTrue(version_matches("16.4-16.6", "16.5"))
+        self.assertFalse(version_matches("16.4-16.6", "16.7"))
+        self.assertTrue(version_matches("16.4, 17.0", "17.0"))
+
+    def test_table_signatures_read_the_version_and_fall_back_to_the_product(self):
+        samples = [("16.4", self.pg_error(2145)), ("16.6", self.pg_error(2145)), ("15.10", self.pg_error(2198))]
+        lines = table_lines(samples, [b"unrelated"], b"E")
+        by_version = {version: pattern for pattern, version in lines}
+        self.assertTrue(matches(by_version["16.4-16.6"], self.pg_error(2145)))
+        self.assertIsNone(matches(by_version["16.4-16.6"], self.pg_error(2198)))
+        self.assertTrue(matches(by_version[None], self.pg_error(9999)))
 
     def test_tag_names_become_versions(self):
         entry = {"versions": {"latest": "2.0.0"}}
