@@ -3,7 +3,7 @@ name = "tokmap"
 version = "0.9.0"
 edition = "2021"
 authors = ["Tokmap Contributors"]
-description = "Asynchronous network scanner with nmap signature database and optional LLM analysis"
+description = "Asynchronous network scanner with its own verified service signatures and optional LLM analysis"
 
 [[bin]]
 name = "tokmap"

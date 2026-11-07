@@ -47,7 +47,7 @@ geminidocs.md
 # Test scripts
 test-tokmap.ps1
 
-# Nmap data files (download separately from https://github.com/nmap/nmap/)
+# Other scanners' data files are not used; keep them out of the repo
 nmap-*
 
 # Stale files
