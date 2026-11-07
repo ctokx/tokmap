@@ -52,13 +52,6 @@ Signatures TCP MongoBuildInfo
 match mongodb m|^.*?ferretdbVersion\x00\x08\x00\x00\x00v(\d+(?:\.\d+)*)\x00|s p/FerretDB/ v/$1/
 # END ghcr.io/ferretdb/ferretdb
 
-# BEGIN ghcr.io/microsoft/garnet
-# tested: ghcr.io/microsoft/garnet:1.0.44 ghcr.io/microsoft/garnet@sha256:20f12649eee74f196db8c4409954cb8a64a5dfb7dc979d8d8eee87d6e34a874a
-# tested: ghcr.io/microsoft/garnet:1.0.46 ghcr.io/microsoft/garnet@sha256:61e340a8a9dab242a36fa3b3647698360b98b057b0da91c1386871a09af2346b
-Signatures TCP RedisInfo
-match redis m|^\$\d+\r\n# Server\r\ngarnet_version:(\d+(?:\.\d+)*)\r\n|s p/Garnet/ v/$1/
-# END ghcr.io/microsoft/garnet
-
 # BEGIN gitea/gitea
 # tested: gitea/gitea:1.21.11 gitea/gitea@sha256:0056032dc8c6ab70583e4a105b9ee0dc72dce4f4fbc8022c98bcec46b0273883
 # tested: gitea/gitea:1.22.6 gitea/gitea@sha256:538658de667c5d098a274f2f63aa6ec891d88f670cdd5282cf27221ba747dda4
@@ -279,6 +272,20 @@ Signatures TCP HttpMissing
 match http m|^HTTP/\d+\.\d+ \d+ \r\n.*?lass="line" /><h3>Apache Tomcat/(\d+(?:\.\d+)*)</h3></b|s p/Apache Tomcat/ v/$1/
 # END tomcat
 
+# BEGIN wordpress
+# tested: wordpress:7.1.2 wordpress@sha256:e04cf657f24889e96b5544828cdd5a92a0b51819f3e1899183f9be6ea0485edf
+# tested: wordpress:7.1.3 wordpress@sha256:8901759bfbb7ebc567dbc44a244c0d96d720d0a67c17bc4f42ec355ddba2e863
+Signatures TCP HttpRoot
+match http m|^H.*?Location: http://localhost/wp-admin/setup-config\.php|s p/WordPress/
+# END wordpress
+
+# BEGIN ghcr.io/microsoft/garnet
+# tested: ghcr.io/microsoft/garnet:1.0.44 ghcr.io/microsoft/garnet@sha256:20f12649eee74f196db8c4409954cb8a64a5dfb7dc979d8d8eee87d6e34a874a
+# tested: ghcr.io/microsoft/garnet:1.0.46 ghcr.io/microsoft/garnet@sha256:61e340a8a9dab242a36fa3b3647698360b98b057b0da91c1386871a09af2346b
+Signatures TCP RedisInfo
+match redis m|^\$\d+\r\n# Server\r\ngarnet_version:(\d+(?:\.\d+)*)\r\n|s p/Garnet/ v/$1/
+# END ghcr.io/microsoft/garnet
+
 # BEGIN valkey/valkey
 # tested: valkey/valkey:7.2.7 valkey/valkey@sha256:6954650f4f9679d3773c13de9b7404e92838421870901b83c677c14b1254872f
 # tested: valkey/valkey:8.0.2 valkey/valkey@sha256:57bcc49c6ade1813ef25206c571b65b66bb0094235ff7fb767941622892297d9
@@ -287,9 +294,12 @@ Signatures TCP RedisInfo
 match redis m|^.*?valkey_version:(\d+(?:\.\d+)*)\r\n|s p/Valkey/ v/$1/
 # END valkey/valkey
 
-# BEGIN wordpress
-# tested: wordpress:7.1.2 wordpress@sha256:e04cf657f24889e96b5544828cdd5a92a0b51819f3e1899183f9be6ea0485edf
-# tested: wordpress:7.1.3 wordpress@sha256:8901759bfbb7ebc567dbc44a244c0d96d720d0a67c17bc4f42ec355ddba2e863
-Signatures TCP HttpRoot
-match http m|^H.*?Location: http://localhost/wp-admin/setup-config\.php|s p/WordPress/
-# END wordpress
+# BEGIN redis
+# tested: redis:6.2.16 redis@sha256:d74db717c8b8a7be8e3cc949b4ad7cf4b87276ff2a47bb487ef0f5f05430c0f9
+# tested: redis:7.2.6 redis@sha256:43c5c111b5b63afce26faea67198f8cf7e63b941460bcfe1525b68a6ad1eef92
+# tested: redis:7.4.1 redis@sha256:bb142a9c18ac18a16713c1491d779697b4e107c22a97266616099d288237ef47
+# tested: redis:8.10.1 redis@sha256:8a1efc5f479551822b47424ccae982026b633f28818eab0387348120a61e10e2
+# tested: redis:8.10.2 redis@sha256:97ec88159e6d7cfb5ddef9015386087d58a912de80112f06ebdfa78fa5989901
+Signatures TCP RedisInfo
+match redis m|^.*?redis_version:(\d+(?:\.\d+)*)\r\n|s p/Redis/ v/$1/
+# END redis
