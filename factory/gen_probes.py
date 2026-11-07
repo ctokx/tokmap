@@ -82,6 +82,8 @@ WEB_PORTS = "80,81,591,3000,4200,5000,5173,8000,8008,8080,8081,8088,8888,9000,90
 # name, payload, rarity, ports, TLS ports, source
 TCP = [
     ("HttpRoot", http("/"), 1, WEB_PORTS, "443,8443,9443", "RFC 9110"),
+    ("HttpConsole", http("/console"), 3, "", "",
+     "path of the debugger console in Werkzeug, which serves Flask in development; read only"),
     ("HttpHead", http("/", "HEAD"), 2, "", "", "RFC 9110"),
     ("HttpOptions", http("/", "OPTIONS"), 3, "", "", "RFC 9110"),
     ("HttpMissing", http("/tokmap-no-such-path"), 2, "", "", "RFC 9110; error pages often name the server"),

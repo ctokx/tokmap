@@ -17,6 +17,8 @@ const EMPTY_PROBE_HEAD_START: Duration = Duration::from_millis(300);
 const PROBES_AT_ONCE: usize = 8;
 /// Silence after data that ends a read, for servers that hold the connection open.
 const QUIET_AFTER_DATA: Duration = Duration::from_millis(300);
+/// How long probes already in flight may add detail after a firm match.
+const DETAIL_GRACE: Duration = Duration::from_millis(300);
 const MIN_PROBE_WAIT: Duration = Duration::from_secs(3);
 const MAX_RESPONSE: usize = 16 * 1024;
 
@@ -32,6 +34,9 @@ pub struct ServiceInfo {
     pub os_hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_info: Option<TlsCertInfo>,
+    /// Extra detail from the signature, such as a debugger being exposed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub info: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -230,7 +235,10 @@ impl Findings {
         self.cert = self.cert.take().or(reply.cert);
         match reply.found {
             Some(m) if m.confidence == service_db::Confidence::High => {
-                self.hard = Some((m, reply.response));
+                let more_detail = self.hard.as_ref().is_none_or(|(found, _)| found.info.is_none() && m.info.is_some());
+                if more_detail {
+                    self.hard = Some((m, reply.response));
+                }
                 return true;
             }
             Some(m) => {
@@ -252,6 +260,7 @@ impl Findings {
                 cpe: (!m.cpe.is_empty()).then_some(m.cpe),
                 os_hint: m.os,
                 tls_info: self.cert,
+                info: m.info,
             };
         }
 
@@ -318,6 +327,11 @@ impl Session<'_> {
             }
             let Some(reply) = running.next().await else { return findings };
             if findings.absorb(reply) {
+                // Probes already sent may add detail to the match, such as an exposed debugger.
+                let grace = Instant::now() + DETAIL_GRACE;
+                while let Ok(Some(reply)) = timeout_at(grace, running.next()).await {
+                    findings.absorb(reply);
+                }
                 return findings;
             }
         }
@@ -404,6 +418,7 @@ pub async fn grab_banner(
                 cpe: None,
                 os_hint: None,
                 tls_info: cert_info,
+                info: None,
             });
         }
     }
@@ -482,6 +497,7 @@ fn identify_service(port: u16, banner: &str) -> ServiceInfo {
             cpe: None,
             os_hint: None,
             tls_info: None,
+            info: None,
         };
     }
 
@@ -494,6 +510,7 @@ fn identify_service(port: u16, banner: &str) -> ServiceInfo {
             cpe: None,
             os_hint: None,
             tls_info: None,
+            info: None,
         };
     }
 
@@ -506,6 +523,7 @@ fn identify_service(port: u16, banner: &str) -> ServiceInfo {
             cpe: None,
             os_hint: None,
             tls_info: None,
+            info: None,
         };
     }
 
@@ -535,6 +553,7 @@ fn parse_ssh_banner(banner: &str) -> ServiceInfo {
         cpe: None,
         os_hint: None,
         tls_info: None,
+        info: None,
     }
 }
 
@@ -579,6 +598,7 @@ fn parse_http_banner(banner: &str) -> ServiceInfo {
         cpe: None,
         os_hint: None,
         tls_info: None,
+        info: None,
     }
 }
 
@@ -607,6 +627,7 @@ fn parse_ftp_banner(banner: &str) -> ServiceInfo {
         cpe: None,
         os_hint: None,
         tls_info: None,
+        info: None,
     }
 }
 
@@ -631,6 +652,7 @@ fn parse_smtp_banner(banner: &str) -> ServiceInfo {
         cpe: None,
         os_hint: None,
         tls_info: None,
+        info: None,
     }
 }
 
@@ -643,6 +665,7 @@ fn parse_mysql_banner(banner: &str) -> ServiceInfo {
         cpe: None,
         os_hint: None,
         tls_info: None,
+        info: None,
     }
 }
 
@@ -676,6 +699,7 @@ fn identify_by_port(port: u16, banner: &str) -> ServiceInfo {
         cpe: None,
         os_hint: None,
         tls_info: None,
+        info: None,
     }
 }
 
@@ -745,6 +769,7 @@ mod tests {
             cpe: Some(vec!["cpe:/a:nginx:nginx:1.18.0".to_string()]),
             os_hint: None,
             tls_info: None,
+            info: None,
         };
         assert!(info.cpe.is_some());
         assert_eq!(info.cpe.unwrap().len(), 1);
@@ -866,6 +891,38 @@ match demo m|^pong| p/Demo/
             assert!(empty_probe.response_hex.starts_with(&to_hex(b"SSH-2.0")));
             assert_eq!(empty_probe.protocol, "tcp");
             assert!(!empty_probe.tunnel);
+        }
+
+        #[tokio::test]
+        async fn a_match_with_more_detail_wins() {
+            const DETAIL_DB: &str = "Probe TCP NULL q||\nProbe TCP Root q|GET / |\nrarity 1\n\
+match http m|^HTTP/1\\.0 200 OK\\r\\nServer: Demo/([\\d.]+)| p/Demo/ v/$1/\n\
+Probe TCP Console q|GET /console |\nrarity 1\n\
+match http m|^HTTP/1\\.0 200 OK\\r\\nServer: Demo/([\\d.]+).*Console|s p/Demo/ v/$1/ i/console exposed/\n";
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    tokio::spawn(async move {
+                        let mut buffer = [0u8; 64];
+                        let n = socket.read(&mut buffer).await.unwrap_or(0);
+                        let console = buffer[..n].starts_with(b"GET /console");
+                        if console {
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+                        let body: &[u8] = if console { b"HTTP/1.0 200 OK\r\nServer: Demo/2.1\r\n\r\nConsole" } else { b"HTTP/1.0 200 OK\r\nServer: Demo/2.1\r\n\r\nhi" };
+                        let _ = socket.write_all(body).await;
+                    });
+                }
+            });
+
+            let matcher = ServiceMatcher::new(parse_service_probes(DETAIL_DB).unwrap());
+            let sockets = Semaphore::new(32);
+            let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+            let info = grab_banner_with_db(ip, port, Duration::from_secs(1), Some(&matcher), 7, &sockets).await.unwrap();
+            assert_eq!(info.version.as_deref(), Some("2.1"));
+            assert_eq!(info.info.as_deref(), Some("console exposed"));
         }
 
         #[tokio::test]

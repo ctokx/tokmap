@@ -14,6 +14,10 @@ rarity 1
 ports 80,81,591,3000,4200,5000,5173,8000,8008,8080,8081,8088,8888,9000,9090
 sslports 443,8443,9443
 
+# path of the debugger console in Werkzeug, which serves Flask in development; read only
+Probe TCP HttpConsole q|GET /console HTTP/1.1\r\nHost: localhost\r\nUser-Agent: tokmap\r\nAccept: */*\r\nConnection: close\r\n\r\n|
+rarity 3
+
 # RFC 9110
 Probe TCP HttpHead q|HEAD / HTTP/1.1\r\nHost: localhost\r\nUser-Agent: tokmap\r\nAccept: */*\r\nConnection: close\r\n\r\n|
 rarity 2

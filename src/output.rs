@@ -156,6 +156,9 @@ impl OutputFormatter {
                     if let Some(ref ver) = svc.version {
                         output.push_str(&format!(" version=\"{}\"", xml_escape(ver)));
                     }
+                    if let Some(ref extra) = svc.info {
+                        output.push_str(&format!(" extrainfo=\"{}\"", xml_escape(extra)));
+                    }
                     output.push_str("/>\n");
                 }
                 output.push_str("      </port>\n");
@@ -283,9 +286,13 @@ fn print_port_line(port: &crate::types::PortResult) {
         .and_then(|s| s.version.as_ref())
         .map(|v| v.as_str())
         .unwrap_or("");
+    let detail = port.service.as_ref()
+        .and_then(|s| s.info.as_ref())
+        .map(|i| format!(" ({})", i))
+        .unwrap_or_default();
 
-    println!("{:5}/{:<3} {:<13} {:<13} {}",
-        port.port, protocol, state_str, service_name, version_str);
+    println!("{:5}/{:<3} {:<13} {:<13} {}{}",
+        port.port, protocol, state_str, service_name, version_str, detail);
 }
 
 /// Service names and versions come from network replies, so they must not be able to break the XML.
