@@ -561,12 +561,18 @@ def split_blocks(text):
     return ["\n".join(block) + "\n" for block in blocks]
 
 
-def check_block(entry, block, recordings):
-    """(tags this signature names correctly, problems). Any problem rejects the signature."""
+def without_block(text, image):
+    return re.sub(rf"# BEGIN {re.escape(image)}\n.*?# END {re.escape(image)}\n\n?", "", text, flags=re.S)
+
+
+def check_block(entry, block, recordings, placed=None):
+    """(tags this signature names correctly, problems). Any problem rejects the signature.
+    `placed` is (verified text without this image, image to go ahead of), as accept writes it."""
+    base, before = placed or (without_block(VERIFIED.read_text(encoding="utf8"), entry["image"]), None)
     with tempfile.NamedTemporaryFile("w", suffix=".matches", delete=False, encoding="utf8") as f:
-        f.write(block)
+        f.write(insert_block(base, f"# BEGIN {entry['image']}\n{block}# END {entry['image']}\n", before))
     try:
-        report, false_positives = judge(replay([PROBES, VERIFIED, f.name], recordings), entry["product"])
+        report, false_positives = judge(replay([PROBES, f.name], recordings), entry["product"])
     finally:
         os.unlink(f.name)
     # Recorded tags the entry does not list are held out for testing, so they must not
@@ -595,8 +601,10 @@ def verify(entry):
     recordings = all_recording_files()
     tags = set(listed_evidence(entry))
     kept, covered = [], set()
+    base = without_block(VERIFIED.read_text(encoding="utf8"), entry["image"])
+    placed = (base, first_claiming_block(entry, base))
     for block in split_blocks(draft.read_text(encoding="utf8")):
-        named, problems = check_block(entry, block, recordings)
+        named, problems = check_block(entry, block, recordings, placed)
         if problems or not named:
             print(f"    dropped {block.splitlines()[0]}: {'; '.join(problems) or 'names no tag'}")
             continue
@@ -633,9 +641,37 @@ def accept(entry, reviewed):
     block = f"# BEGIN {entry['image']}\n{tested}\n{body}\n# END {entry['image']}\n"
 
     text = VERIFIED.read_text(encoding="utf8")
-    text = re.sub(rf"# BEGIN {re.escape(entry['image'])}\n.*?# END {re.escape(entry['image'])}\n", "", text, flags=re.S)
-    VERIFIED.write_text(text.rstrip("\n") + "\n\n" + block, encoding="utf8", newline="\n")
-    print(f"  {entry['image']}: accepted")
+    text = without_block(text, entry["image"])
+    before = first_claiming_block(entry, text)
+    VERIFIED.write_text(insert_block(text, block, before), encoding="utf8", newline="\n")
+    print(f"  {entry['image']}: accepted" + (f", ahead of {before}" if before else ""))
+
+
+BLOCK = re.compile(r"# BEGIN (\S+)\n.*?# END \1\n", re.S)
+
+
+def insert_block(text, block, before=None):
+    """The verified file with `block` placed just ahead of image `before`'s block, or at the end."""
+    at = next((m.start() for m in BLOCK.finditer(text) if m.group(1) == before), None)
+    if at is None:
+        return text.rstrip("\n") + "\n\n" + block
+    return text[:at] + block + "\n" + text[at:]
+
+
+def first_claiming_block(entry, text):
+    """The first accepted image whose signatures match this product's recordings. Signatures
+    are tried in file order, so a specific product (Valkey) must come ahead of a general one
+    that also matches it (Redis), or the general one would name it."""
+    mine = [p for p in all_recording_files() if p.parent.parent.name == slug(entry["image"])]
+    for m in BLOCK.finditer(text):
+        with tempfile.NamedTemporaryFile("w", suffix=".matches", delete=False, encoding="utf8") as f:
+            f.write(m.group(0))
+        try:
+            if any(r["match"] and r["match"].get("product") != entry["product"] for r in replay([PROBES, f.name], mine)):
+                return m.group(1)
+        finally:
+            os.unlink(f.name)
+    return None
 
 
 def score(images):

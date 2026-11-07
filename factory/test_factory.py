@@ -1,7 +1,7 @@
 import re
 import unittest
 
-from factory import (draft_signature, escape, markers, names_product, probe_rarities, product_pattern, split_blocks,
+from factory import (draft_signature, escape, insert_block, markers, names_product, probe_rarities, product_pattern, split_blocks,
                      table_lines, version_matches, version_table, version_text,
                      version_of, versioned_pattern)
 
@@ -178,6 +178,14 @@ class DraftTests(unittest.TestCase):
         self.assertIsNotNone(product_pattern(samples, ["Redis"]))
         self.assertIsNone(product_pattern(samples, ["Postgres"]))
         self.assertIsNone(product_pattern(samples[:1], ["Redis"]))
+
+    def test_insert_block_goes_ahead_of_the_general_one(self):
+        text = "# header\n\n# BEGIN redis\nmatch a\n# END redis\n\n# BEGIN nginx\nmatch b\n# END nginx\n"
+        block = "# BEGIN valkey/valkey\nmatch c\n# END valkey/valkey\n"
+        placed = insert_block(text, block, "redis")
+        self.assertLess(placed.index("BEGIN valkey"), placed.index("BEGIN redis"))
+        self.assertTrue(insert_block(text, block).endswith(block))
+        self.assertEqual(insert_block(text, block, "absent"), insert_block(text, block))
 
     def test_product_pattern_keeps_only_the_naming_line(self):
         samples = [("1", b"HTTP/1.1 200 OK\r\nDate: Sat, 07 Nov\r\nServer: Caddy\r\n\r\n"),
