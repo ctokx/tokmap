@@ -1,7 +1,8 @@
 import re
 import unittest
 
-from factory import draft_signature, escape, probe_rarities, product_pattern, versioned_pattern
+from factory import (draft_signature, escape, names_product, probe_rarities, product_pattern, split_blocks,
+                     version_of, versioned_pattern)
 
 REDIS = {"image": "redis", "service": "redis", "product": "Redis", "tags": []}
 
@@ -47,6 +48,49 @@ class DraftTests(unittest.TestCase):
         pattern = versioned_pattern([("1.12.0", reply("1.12.0", "2024-12-23")), ("1.11.3", reply("1.11.3", "2024-11-14"))])
         self.assertNotIn("000Z", pattern)
         self.assertEqual(matches(pattern, b'{"commitDate":"2025-01-01T00:00:00Z","pkgVersion":"1.13.0"}').group(1), b"1.13.0")
+
+    def test_numbers_in_the_shared_start_match_any_number(self):
+        def reply(version):
+            return f"$3590\r\n# Server\r\ngarnet_version:{version}\r\nos:Unix".encode()
+        pattern = versioned_pattern([("1.0.46", reply("1.0.46")), ("1.0.44", reply("1.0.44"))])
+        later = b"$3604\r\n# Server\r\ngarnet_version:1.0.50\r\nos:Unix"
+        self.assertEqual(matches(pattern, later).group(1), b"1.0.50")
+
+    def test_product_name_earlier_in_the_reply_is_required(self):
+        def reply(name, version):
+            return f'{{"distribution" : "{name}",\n    "number" : "{version}",\n    "build"'.encode()
+        samples = [("2.18.0", reply("opensearch", "2.18.0")), ("2.17.1", reply("opensearch", "2.17.1"))]
+        pattern = versioned_pattern(samples, ["OpenSearch"])
+        self.assertIn("opensearch", pattern)
+        self.assertTrue(matches(pattern, reply("opensearch", "2.19.0")))
+        self.assertIsNone(matches(pattern, reply("elasticsearch-like", "8.15.0").replace(b"opensearch", b"other")))
+
+    def test_signatures_that_name_the_product_rank_first(self):
+        def tagged(version):
+            return [{"protocol": "tcp", "probe": "Plain", "response_hex": f'HTTP/1.1 200 OK\r\n\r\n{{"version":"{version}"}}'.encode().hex()},
+                    {"protocol": "tcp", "probe": "Named", "response_hex": f'HTTP/1.1 200 OK\r\n\r\n{{"title":"qdrant","version":"{version}"}}'.encode().hex()}]
+        evidence = {"1.12.4": tagged("1.12.4"), "1.11.5": tagged("1.11.5")}
+        text = draft_signature({"image": "qdrant/qdrant", "service": "http", "product": "Qdrant"}, evidence)
+        self.assertEqual(re.findall(r"Signatures TCP (\w+)", text)[0], "Named")
+
+    def test_drafts_split_into_one_block_per_signature(self):
+        text = "# header\nSignatures TCP A\nmatch x m|a|\nSignatures TCP B\nmatch y m|b|\nsoftmatch y m|c|\n"
+        self.assertEqual(split_blocks(text), ["Signatures TCP A\nmatch x m|a|\n",
+                                              "Signatures TCP B\nmatch y m|b|\nsoftmatch y m|c|\n"])
+
+    def test_signatures_without_the_product_name_are_flagged(self):
+        entry = {"product": "Ollama", "image": "ollama/ollama"}
+        nameless = 'Signatures TCP X\nmatch http m|"version":"(\\d+)"|s p/Ollama/ v/$1/\n'
+        named = 'Signatures TCP X\nmatch http m|ollama.*?"version":"(\\d+)"|s p/Ollama/ v/$1/\n'
+        self.assertFalse(names_product(nameless, entry))
+        self.assertTrue(names_product(named, entry))
+
+    def test_tag_names_become_versions(self):
+        entry = {"versions": {"latest": "2.0.0"}}
+        self.assertEqual(version_of(entry, "v1.25.1"), "1.25.1")
+        self.assertEqual(version_of(entry, "7.2.4"), "7.2.4")
+        self.assertEqual(version_of(entry, "latest"), "2.0.0")
+        self.assertEqual(version_of(entry, "vanilla"), "vanilla")
 
     def test_too_little_context_is_refused(self):
         self.assertIsNone(versioned_pattern([("1.2", b"1.2"), ("1.3", b"1.3")]))

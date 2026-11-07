@@ -80,6 +80,11 @@ def escape(data: bytes) -> str:
     return "".join(out)
 
 
+def version_of(entry, tag):
+    """The version a tag stands for: from the image list, else the tag without a leading v."""
+    return entry.get("versions", {}).get(tag, re.sub(r"^v(?=\d)", "", tag))
+
+
 def version_class(versions):
     if all(re.fullmatch(r"\d+(\.\d+)*", v) for v in versions):
         return r"\d+(?:\.\d+)*"
@@ -91,8 +96,31 @@ def field(tag, value):
     return f"{tag}{delimiter}{value}{delimiter}"
 
 
-def versioned_pattern(samples):
-    """A regex capturing the version, from (version, reply) pairs, or None if too weak."""
+def escape_any_number(data: bytes) -> str:
+    """Like escape, but every number matches any number: lengths and counters change."""
+    return r"\d+".join(escape(part) for part in re.split(rb"\d+", data))
+
+
+def mentions(data: bytes, names) -> bool:
+    return any(name.lower().encode() in data.lower() for name in names if name)
+
+
+def name_before(prefixes, before_len, names):
+    """(bytes naming the product as the first reply writes them, earliest offset among replies),
+    found before the version context in every reply, or (b"", 0)."""
+    regions = [p[:len(p) - before_len].lower() for p in prefixes]
+    for name in (n.lower().encode() for n in names if n):
+        if all(name in region for region in regions):
+            at = regions[0].rfind(name)
+            return prefixes[0][at:at + len(name)], min(region.rfind(name) for region in regions)
+    return b"", 0
+
+
+def versioned_pattern(samples, names=()):
+    """A regex capturing the version, from (version, reply) pairs, or None if too weak.
+
+    When the product's name appears earlier in every reply, the pattern requires it, so a
+    reply shaped the same way by another product is not mistaken for this one."""
     if not samples or any(v.encode() not in data for v, data in samples):
         return None
     prefixes, suffixes = [], []
@@ -121,8 +149,13 @@ def versioned_pattern(samples):
     if len(start) + len(before) + len(after) < MIN_LITERAL:
         return None
     gap = "" if all(r == rests[0] for r in rests) and rests[0] == before else ".*?"
+    if not mentions(start + before + after, names):
+        name, earliest = name_before(prefixes, len(before), names)
+        if name:
+            start = start[:earliest]  # the name may begin inside the shared start
+            gap = f".*?{escape(name)}.*?"
     capture = f"({version_class([v for v, _ in samples])})"
-    return f"^{escape(start)}{gap}{escape(before)}{capture}{escape(after)}"
+    return f"^{escape_any_number(start)}{gap}{escape(before)}{capture}{escape(after)}"
 
 
 def product_pattern(samples, names):
@@ -157,25 +190,27 @@ def draft_signature(entry, evidence, rarities=None):
     rarities = rarities or {}
     groups = {}
     for tag, recordings in evidence.items():
-        version = entry.get("versions", {}).get(tag, tag)
+        version = version_of(entry, tag)
         for r in recordings:
             key = (r["protocol"].upper(), r["probe"])
             groups.setdefault(key, {}).setdefault(tag, (version, bytes.fromhex(r["response_hex"])))
 
     candidates = []
-    names = [entry["product"], entry["image"].split("/")[-1], entry["service"]]
+    product_names = [entry["product"], entry["image"].split("/")[-1]]
     for (protocol, probe), by_tag in groups.items():
         if len(by_tag) < len(evidence):
             continue  # every recorded tag must have answered this probe
         samples = list(by_tag.values())
         rarity = rarities.get(probe, DEFAULT_RARITY)
-        pattern = versioned_pattern(samples)
+        pattern = versioned_pattern(samples, product_names)
         if pattern:
-            candidates.append((0, rarity, -len(pattern), protocol, probe, pattern, True))
+            # Patterns that name the product rank first: they are least likely to match others.
+            nameless = not any(n.lower() in pattern.lower() for n in product_names)
+            candidates.append((0, nameless, rarity, -len(pattern), protocol, probe, pattern, True))
             continue
-        pattern = product_pattern(samples, names)
+        pattern = product_pattern(samples, product_names + [entry["service"]])
         if pattern:
-            candidates.append((1, rarity, -len(pattern), protocol, probe, pattern, False))
+            candidates.append((1, False, rarity, -len(pattern), protocol, probe, pattern, False))
     if not candidates:
         return None
 
@@ -183,7 +218,7 @@ def draft_signature(entry, evidence, rarities=None):
     kind = candidates[0][0]
     keep = MAX_SIGNATURES if kind == 0 else 1
     text = f"# Draft for {entry['image']} from tags {', '.join(sorted(evidence))}. Not verified.\n"
-    for _, _, _, protocol, probe, pattern, has_version in [c for c in candidates if c[0] == kind][:keep]:
+    for *_, protocol, probe, pattern, has_version in [c for c in candidates if c[0] == kind][:keep]:
         info = f" {field('p', entry['product'])}" + (" v/$1/" if has_version else "")
         text += f"Signatures {protocol} {probe}\nmatch {entry['service']} m|{pattern}|s{info}\n"
     return text
@@ -280,7 +315,7 @@ def capture(entry, tag, force, prune):
         (out / "recordings.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recordings), encoding="utf8")
         meta = {
             "image": entry["image"], "tag": tag, "digest": digests[0] if digests else None,
-            "product": entry["product"], "version": entry.get("versions", {}).get(tag, tag),
+            "product": entry["product"], "version": version_of(entry, tag),
             "service": entry["service"], "ports": sorted({f"{p}/{proto}" for p, proto in ports.values()}),
             "captured": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
@@ -338,29 +373,74 @@ def judge(results, signature_product):
     return report, false_positives
 
 
+def split_blocks(text):
+    """A draft's signatures, one `Signatures` line with its match lines per block."""
+    blocks = []
+    for line in text.splitlines():
+        if line.startswith("Signatures "):
+            blocks.append([line])
+        elif blocks and line.startswith(("match ", "softmatch ")):
+            blocks[-1].append(line)
+    return ["\n".join(block) + "\n" for block in blocks]
+
+
+def check_block(entry, block, recordings):
+    """(tags this signature names correctly, problems). Any problem rejects the signature."""
+    with tempfile.NamedTemporaryFile("w", suffix=".matches", delete=False, encoding="utf8") as f:
+        f.write(block)
+    try:
+        report, false_positives = judge(replay([PROBES, VERIFIED, f.name], recordings), entry["product"])
+    finally:
+        os.unlink(f.name)
+    has_version = "v/$1/" in block
+    mine = [r for r in report if r["image"] == entry["image"] and r["product_ok"]]
+    problems = [f"{r['tag']}: expected {r['expected']}, found {r['found']}"
+                for r in mine if has_version and not r["version_ok"]]
+    problems += [f"also matched {fp}" for fp in false_positives]
+    return {r["tag"] for r in mine}, problems
+
+
 def verify(entry):
+    """Keeps each signature that is right wherever it matches and matches no other image.
+    Passes when the kept signatures name every recorded tag."""
     draft = DRAFTS / f"{slug(entry['image'])}.matches"
     if not draft.exists():
         print(f"  {entry['image']}: no draft")
         return False
-    results = replay([PROBES, VERIFIED, draft], all_recording_files())
-    report, false_positives = judge(results, entry["product"])
-    has_version = "v/$1/" in draft.read_text(encoding="utf8")
-    mine = [r for r in report if r["image"] == entry["image"]]
-    wrong = [r for r in mine if not r["product_ok"] or (has_version and not r["version_ok"])]
-    ok = bool(mine) and not wrong and not false_positives
-    print(f"  {entry['image']}: {'PASS' if ok else 'FAIL'} ({len(mine)} tags)")
-    for r in wrong:
-        print(f"    {r['tag']}: expected {r['expected']}, found {r['found']}")
-    for fp in false_positives:
-        print(f"    also matched {fp}")
+    recordings = all_recording_files()
+    tags = set(load_evidence(entry["image"]))
+    kept, covered = [], set()
+    for block in split_blocks(draft.read_text(encoding="utf8")):
+        named, problems = check_block(entry, block, recordings)
+        if problems or not named:
+            print(f"    dropped {block.splitlines()[0]}: {'; '.join(problems) or 'names no tag'}")
+            continue
+        kept.append(block)
+        covered |= named
+    ok = bool(kept) and covered == tags
+    print(f"  {entry['image']}: {'PASS' if ok else 'FAIL'} ({len(covered)} of {len(tags)} tags, "
+          f"{len(kept)} signatures kept)")
+    if kept:
+        header = draft.read_text(encoding="utf8").splitlines()[0]
+        draft.write_text(header + "\n" + "".join(kept), encoding="utf8", newline="\n")
     return ok
 
 
-def accept(entry):
+def names_product(block, entry):
+    """Whether a signature's pattern contains the product's name. Ones that do not could match
+    another product shaped the same way, which a small set of recordings may not reveal."""
+    patterns = " ".join(re.findall(r"^(?:soft)?match \S+ m\|([^|]*)\|", block, re.M)).lower()
+    return any(name.lower() in patterns for name in (entry["product"], entry["image"].split("/")[-1]))
+
+
+def accept(entry, reviewed):
     if not verify(entry):
         return
     draft = (DRAFTS / f"{slug(entry['image'])}.matches").read_text(encoding="utf8")
+    if not reviewed and not all(names_product(b, entry) for b in split_blocks(draft)):
+        print(f"  {entry['image']}: not accepted, a signature does not contain the product name. "
+              "Check it by hand, then accept with --reviewed.")
+        return
     evidence = sorted(EVIDENCE.glob(f"{slug(entry['image'])}/*/meta.json"))
     proven = [json.loads(m.read_text(encoding="utf8")) for m in evidence]
     body = "\n".join(line for line in draft.splitlines() if not line.startswith("#"))
@@ -393,6 +473,8 @@ def main():
     parser.add_argument("--only", help="comma-separated image names")
     parser.add_argument("--force", action="store_true", help="capture again even if evidence exists")
     parser.add_argument("--prune", action="store_true", help="delete each image after capturing it")
+    parser.add_argument("--reviewed", action="store_true",
+                        help="accept signatures that do not contain the product name, after checking them")
     args = parser.parse_args()
     images = load_images(args.images, args.only)
 
@@ -416,7 +498,7 @@ def main():
         sys.exit(1 if failed else 0)
     elif args.command == "accept":
         for entry in images:
-            accept(entry)
+            accept(entry, args.reviewed)
     else:
         score(images)
 
