@@ -1,2 +1,22 @@
 # Signatures proven against recordings of real software. Written by factory/factory.py accept.
 # Each block names the probe it extends, the images and tags it was tested on, and their digests.
+
+# BEGIN werkzeug
+# tested: werkzeug:2.3.8 tokmap-factory/werkzeug@sha256:c3484941c2e04f08c8ce61ba3644dfa5b597bbbf9e9b8192b5534b5d46b84f24
+# tested: werkzeug:3.0.6 tokmap-factory/werkzeug@sha256:0c103795ebd0f025f4251045fa0dee86186972de2521d9ec90a18eb6730e13a2
+# tested: werkzeug:3.1.3 tokmap-factory/werkzeug@sha256:8bb9f7be3bcf01639951fdbe57be13e3de32fe4d4035f01bfed3ab002ced2251
+Signatures TCP HttpRoot
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\nServer: Werkzeug/(\d+(?:\.\d+)*) Python/|s p/Werkzeug/ v/$1/
+Signatures TCP HttpHead
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\nServer: Werkzeug/(\d+(?:\.\d+)*) Python/|s p/Werkzeug/ v/$1/
+Signatures TCP HttpMissing
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\nServer: Werkzeug/(\d+(?:\.\d+)*) Python/|s p/Werkzeug/ v/$1/
+# END werkzeug
+
+# BEGIN werkzeug-debug
+# tested: werkzeug-debug:2.3.8 tokmap-factory/werkzeug@sha256:5cd97fedce3079eb7d8e601adab199b5137693c7bf2ed4ebc98f7e920b4334f8
+# tested: werkzeug-debug:3.0.6 tokmap-factory/werkzeug@sha256:c528c70d9957ad63852e170e75799e1e3d3e2eaba3f5a373967f1be1c8830239
+# tested: werkzeug-debug:3.1.3 tokmap-factory/werkzeug@sha256:bc2ff6ab1abf973c9a3939acc6303df817c52091d145a580734efbc94a3de57d
+Signatures TCP HttpConsole
+match http m|^HTTP/\d+\.\d+ 200 OK\r\nServer: Werkzeug/(\d+(?:\.\d+)*) Python/[\d.]+\r\n.*?<title>Console // Werkzeug Debugger</title>|s p/Werkzeug/ v/$1/ i/debugger console exposed/
+# END werkzeug-debug

@@ -14,5 +14,9 @@
   {"image": "tomcat", "service": "http", "product": "Apache Tomcat", "tags": ["10.1.33", "9.0.97"], "settle": 10},
   {"image": "valkey/valkey", "service": "redis", "product": "Valkey", "tags": ["8.1.0", "8.0.2", "7.2.7"]},
   {"image": "getmeili/meilisearch", "service": "http", "product": "Meilisearch", "tags": ["v1.12.0", "v1.11.3", "v1.10.3"],
-   "versions": {"v1.12.0": "1.12.0", "v1.11.3": "1.11.3", "v1.10.3": "1.10.3"}, "ports": ["7700/tcp"]}
+   "versions": {"v1.12.0": "1.12.0", "v1.11.3": "1.11.3", "v1.10.3": "1.10.3"}, "ports": ["7700/tcp"]},
+  {"image": "werkzeug", "build": "factory/apps/werkzeug", "service": "http", "product": "Werkzeug",
+   "tags": ["3.1.3", "3.0.6", "2.3.8"], "env": {"DEBUG": "0"}},
+  {"image": "werkzeug-debug", "build": "factory/apps/werkzeug", "service": "http", "product": "Werkzeug",
+   "tags": ["3.1.3", "3.0.6", "2.3.8"], "env": {"DEBUG": "1"}, "info": "debugger console exposed"}
 ]

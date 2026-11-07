@@ -45,6 +45,10 @@ Add an entry to `images.json`:
 | `env`, `args` | Optional settings the container needs to start |
 | `settle` | Optional seconds to wait after start, default 5 |
 | `ports` | Optional ports to publish, such as `["8080/tcp"]`, when the image declares none |
+| `build` | Optional folder with a Dockerfile, for software without a published image. The tag is passed as the `VERSION` build argument |
+| `info` | Optional detail the signature must report, such as `debugger console exposed`. Versions without it must not report it |
+
+`factory/apps/werkzeug/` is an example of `build`: Werkzeug's development server, recorded with the debugger on and off.
 
 Use at least two tags, so the draft can tell the version apart from the text around it.
 

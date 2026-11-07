@@ -247,6 +247,18 @@ def load_evidence(image):
     return found
 
 
+def image_ref(entry, tag):
+    """The image to run: a published one, or one built from a Dockerfile in factory/apps/."""
+    if entry.get("build"):
+        return f"tokmap-factory/{Path(entry['build']).name}:{tag}"
+    return f"{entry['image']}:{tag}"
+
+
+def listed_evidence(entry):
+    """Evidence for the tags the image list names only, so other recorded tags can be held out."""
+    return {tag: recs for tag, recs in load_evidence(entry["image"]).items() if tag in entry["tags"]}
+
+
 def docker(*args, check=True):
     result = subprocess.run(["docker", *args], capture_output=True, text=True)
     if check and result.returncode != 0:
@@ -284,13 +296,17 @@ def record_once(ports, out_dir):
 
 
 def capture(entry, tag, force, prune):
-    ref = f"{entry['image']}:{tag}"
+    ref = image_ref(entry, tag)
     out = EVIDENCE / slug(entry["image"]) / tag
     if (out / "meta.json").exists() and not force:
         print(f"  {ref}: already captured")
         return
-    docker("pull", ref)
+    if entry.get("build"):
+        docker("build", "-q", "-t", ref, "--build-arg", f"VERSION={tag}", str(ROOT / entry["build"]))
+    else:
+        docker("pull", ref)
     digests = json.loads(docker("image", "inspect", "--format", "{{json .RepoDigests}}", ref) or "[]")
+    digests = digests or [docker("image", "inspect", "--format", "{{.Id}}", ref)]
     env = [arg for key, value in entry.get("env", {}).items() for arg in ("-e", f"{key}={value}")]
     # Loopback only: these images run with default settings, often without a password.
     publish = [arg for port in exposed_ports(entry, ref) for arg in ("-p", f"127.0.0.1::{port}")]
@@ -316,7 +332,8 @@ def capture(entry, tag, force, prune):
         meta = {
             "image": entry["image"], "tag": tag, "digest": digests[0] if digests else None,
             "product": entry["product"], "version": version_of(entry, tag),
-            "service": entry["service"], "ports": sorted({f"{p}/{proto}" for p, proto in ports.values()}),
+            "service": entry["service"], "info": entry.get("info"),
+            "ports": sorted({f"{p}/{proto}" for p, proto in ports.values()}),
             "captured": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         (out / "meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf8")
@@ -348,10 +365,14 @@ def all_recording_files():
 
 
 def identify(matches):
-    """The best (product, version) from one tag's replay results: hard matches beat soft ones."""
+    """The best (product, version, detail) from one tag's replay results. Hard matches beat soft
+    ones, then matches with detail, then matches with a version, as in tokmap itself."""
     found = [m["match"] for m in matches if m["match"]]
-    found.sort(key=lambda m: (m["confidence"] == "high", m.get("version") is not None), reverse=True)
-    return (found[0].get("product") or found[0]["service_name"], found[0].get("version")) if found else (None, None)
+    found.sort(key=lambda m: (m["confidence"] == "high", m.get("info") is not None,
+                              m.get("version") is not None), reverse=True)
+    if not found:
+        return None, None, None
+    return found[0].get("product") or found[0]["service_name"], found[0].get("version"), found[0].get("info")
 
 
 def judge(results, signature_product):
@@ -362,14 +383,16 @@ def judge(results, signature_product):
     report, false_positives = [], []
     for path, matches in sorted(by_file.items()):
         meta = json.loads((Path(path).parent / "meta.json").read_text(encoding="utf8"))
-        product, version = identify(matches)
+        product, version, info = identify(matches)
         if signature_product and meta["product"] != signature_product:
             if any(m["match"] and m["match"].get("product") == signature_product for m in matches):
                 false_positives.append(f"{meta['image']}:{meta['tag']}")
             continue
-        report.append({"image": meta["image"], "tag": meta["tag"], "expected": [meta["product"], meta["version"]],
-                       "found": [product, version], "product_ok": product == meta["product"],
-                       "version_ok": version == meta["version"]})
+        expected_info = meta.get("info")
+        report.append({"image": meta["image"], "tag": meta["tag"],
+                       "expected": [meta["product"], meta["version"], expected_info],
+                       "found": [product, version, info], "product_ok": product == meta["product"],
+                       "version_ok": version == meta["version"], "info_ok": info == expected_info})
     return report, false_positives
 
 
@@ -395,8 +418,13 @@ def check_block(entry, block, recordings):
     has_version = "v/$1/" in block
     mine = [r for r in report if r["image"] == entry["image"] and r["product_ok"]]
     problems = [f"{r['tag']}: expected {r['expected']}, found {r['found']}"
-                for r in mine if has_version and not r["version_ok"]]
+                for r in mine if (has_version and not r["version_ok"]) or not r["info_ok"]]
     problems += [f"also matched {fp}" for fp in false_positives]
+    # Another image of the same product: claiming the wrong detail or version there is wrong,
+    # while reporting less, such as no detail, is not.
+    problems += [f"wrong for {r['image']}:{r['tag']}: expected {r['expected']}, found {r['found']}"
+                 for r in report if r["image"] != entry["image"] and r["product_ok"]
+                 and (r["found"][2] not in (None, r["expected"][2]) or (r["found"][1] and not r["version_ok"]))]
     return {r["tag"] for r in mine}, problems
 
 
@@ -408,7 +436,7 @@ def verify(entry):
         print(f"  {entry['image']}: no draft")
         return False
     recordings = all_recording_files()
-    tags = set(load_evidence(entry["image"]))
+    tags = set(listed_evidence(entry))
     kept, covered = [], set()
     for block in split_blocks(draft.read_text(encoding="utf8")):
         named, problems = check_block(entry, block, recordings)
@@ -417,7 +445,7 @@ def verify(entry):
             continue
         kept.append(block)
         covered |= named
-    ok = bool(kept) and covered == tags
+    ok = bool(kept) and tags <= covered
     print(f"  {entry['image']}: {'PASS' if ok else 'FAIL'} ({len(covered)} of {len(tags)} tags, "
           f"{len(kept)} signatures kept)")
     if kept:
@@ -459,7 +487,7 @@ def score(images):
     wanted = {i["image"] for i in images}
     report = [r for r in report if r["image"] in wanted]
     for r in report:
-        mark = "ok" if r["product_ok"] and r["version_ok"] else ("product only" if r["product_ok"] else "miss")
+        mark = "ok" if r["product_ok"] and r["version_ok"] and r["info_ok"] else ("product only" if r["product_ok"] else "miss")
         print(f"  {r['image']}:{r['tag']:<12} {mark:<13} found {r['found']}")
     total = len(report) or 1
     print(f"\n  tags: {len(report)}  product right: {sum(r['product_ok'] for r in report) * 100 // total}%"
@@ -489,7 +517,7 @@ def main():
         DRAFTS.mkdir(exist_ok=True)
         rarities = probe_rarities(PROBES.read_text(encoding="utf8"))
         for entry in images:
-            text = draft_signature(entry, load_evidence(entry["image"]), rarities)
+            text = draft_signature(entry, listed_evidence(entry), rarities)
             if text:
                 (DRAFTS / f"{slug(entry['image'])}.matches").write_text(text, encoding="utf8", newline="\n")
             print(f"  {entry['image']}: {'drafted' if text else 'no clear signature, needs a hand-written draft'}")
