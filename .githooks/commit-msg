@@ -1,0 +1,28 @@
+#!/bin/sh
+# Rejects commit messages that break the rules in CLAUDE.md.
+message=$(grep -v '^#' "$1")
+subject=$(printf '%s\n' "$message" | head -n 1)
+nl='
+'
+problems=""
+
+add() {
+    problems="$problems$nl  $1"
+}
+
+[ ${#subject} -gt 72 ] && add "subject is ${#subject} characters, the limit is 72"
+case "$subject" in *.) add "subject ends with a period" ;; esac
+[ -n "$(printf '%s\n' "$message" | sed -n 2p)" ] && add "the second line must be blank"
+
+banned='nmap|masscan|rustscan|naabu|zmap|faster|slower|better than|beats|outperform|blazing|revolutionary|licen[cs]e (violation|issue|risk)|generated with|co-authored-by'
+found=$(printf '%s\n' "$message" | grep -inE "$banned")
+[ -n "$found" ] && add "wording the rules forbid:$nl$(printf '%s\n' "$found" | sed 's/^/    line /')"
+
+secrets='(api[_-]?key|token|secret|password)[[:space:]]*[:=][[:space:]]*[^[:space:]]{8,}|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[a-z]{2,}|[A-Za-z]:\\Users\\|/home/[a-z]|/Users/[a-z]'
+found=$(printf '%s\n' "$message" | grep -inE "$secrets")
+[ -n "$found" ] && add "looks like a secret, email address or personal path:$nl$(printf '%s\n' "$found" | sed 's/^/    line /')"
+
+if [ -n "$problems" ]; then
+    printf 'Commit message rejected (see CLAUDE.md):%s\n' "$problems" >&2
+    exit 1
+fi
