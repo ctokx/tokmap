@@ -474,7 +474,7 @@ def capture(entry, tag, force, prune):
         (out / "meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf8")
         print(f"  {ref}: {len(recordings)} replies recorded")
     finally:
-        docker("rm", "-f", container, check=False)
+        docker("rm", "-f", "-v", container, check=False)  # -v: images declare anonymous volumes
         if prune:
             docker("rmi", ref, check=False)
 
