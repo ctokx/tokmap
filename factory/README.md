@@ -24,6 +24,8 @@ python factory/factory.py score     # product and version accuracy over all evid
 
 Rebuild tokmap after `accept`, so the new signatures are built in.
 
+`accept` holds back a signature whose pattern does not contain the product name, since it could match another product shaped the same way. Read it, and the replies it matches, then run `accept --reviewed`. Reject patterns that are generic (a bare `"version"` field, a common header) or that carry a date, a length or a counter.
+
 `capture` skips tags that already have evidence. Use `--force` to record again, and `--prune` to delete each image after recording it.
 
 ## Adding an image
@@ -73,10 +75,17 @@ match redis m|^\$.*?redis_version:(\d+(?:\.\d+)*)\r\n|s p/Redis/ v/$1/
 
 `Signatures PROTOCOL PROBE` adds the matches below it to a probe from `signatures/tokmap.probes`. A signature only sees replies to its own probe.
 
+A product that says nothing about itself in plain replies may still name itself in the certificate it generates on first start. Traefik's is `TRAEFIK DEFAULT CERT`, and Elasticsearch's is issued by `Elasticsearch security auto-configuration HTTP CA`. A signature on the `TlsClientHello` probe can read that. The generic `TLS` match is a soft match, so such a signature wins over it.
+
+## Look-alikes
+
+Signatures are tried in file order, and the first match wins. Some products copy another's reply: Valkey, Garnet and Dragonfly all send Redis's `redis_version` line. So `accept` places each new block ahead of the first accepted block that would otherwise name its recordings, and `verify` tests each signature at that same position. Redis's signature then sees only what the look-alikes' signatures did not claim.
+
 ## Rules
 
 - Signatures come only from our own recordings. Do not copy or consult other scanners' signature databases.
 - New probes go in `gen_probes.py`, written from the protocol's public specification and named beside the probe. Run `python factory/gen_probes.py` to regenerate `signatures/tokmap.probes`.
+- The port ranking in `signatures/tcp-ports.txt`, used by `--top-ports`, `-F` and the default scan, comes from `python factory/gen_ports.py`. It reads public Docker Hub and IANA metadata only.
 
 ## Safety
 
