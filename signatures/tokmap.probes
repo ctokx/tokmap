@@ -79,8 +79,8 @@ Probe TCP HttpSolrSystem q|GET /solr/admin/info/system HTTP/1.1\r\nHost: localho
 rarity 6
 ports 8983
 
-# WordPress setup page, served until the site is set up; read only
-Probe TCP HttpWordPressInstall q|GET /wp-admin/install.php HTTP/1.1\r\nHost: localhost\r\nUser-Agent: tokmap\r\nAccept: */*\r\nConnection: close\r\n\r\n|
+# WordPress setup page, where every page redirects until a database is configured; read only
+Probe TCP HttpWordPressSetup q|GET /wp-admin/setup-config.php HTTP/1.1\r\nHost: localhost\r\nUser-Agent: tokmap\r\nAccept: */*\r\nConnection: close\r\n\r\n|
 rarity 6
 
 # bare line endings, which text protocols answer with an error
