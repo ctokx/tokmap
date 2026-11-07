@@ -412,3 +412,11 @@ match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?"solr-spec-version":"(\d+(?:\.\d+)*)"|s
 Signatures TCP HttpRoot
 match http m|^H.*?Location: /solr/|s p/Apache Solr/
 # END solr
+
+# BEGIN ghost
+# tested: ghost:6.73.0 ghost@sha256:3e62a20e7f172af9c313bcd74c67098359c4fa7f7121a20ebd740c9f6cd0c0b9
+# tested: ghost:6.74.0 ghost@sha256:bee5368f718f04ea85129045588a0afc6e6effc3bb0a369e8859337bc19d8b9b
+# tested: ghost:6.75.0 ghost@sha256:6303736accca40f3057b30b7c7230a66be2e263402f5cac7cda4466915a5b9bd
+Signatures TCP HttpRoot
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?<meta name="generator" content="Ghost (\d+\.\d+)">|s p/Ghost/ v/$1.x/
+# END ghost
