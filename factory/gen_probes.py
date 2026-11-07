@@ -146,8 +146,9 @@ def render():
         if tls_ports:
             lines.append(f"sslports {tls_ports}")
         if name == "TlsClientHello":
-            # A handshake record or an alert means the port speaks TLS.
-            lines += [r"match ssl m|^\x16\x03[\x00-\x04]|s p/TLS/", r"match ssl m|^\x15\x03[\x00-\x04]|s p/TLS/"]
+            # A handshake record or an alert means the port speaks TLS. Soft, so a signature
+            # for the product behind it, such as one reading its certificate, wins.
+            lines += [r"softmatch ssl m|^\x16\x03[\x00-\x04]|s p/TLS/", r"softmatch ssl m|^\x15\x03[\x00-\x04]|s p/TLS/"]
         lines.append("")
     for name, payload, rarity, ports, source in UDP:
         lines += [f"# {source}", f"Probe UDP {name} q|{escape(payload)}|", f"rarity {rarity}", f"ports {ports}", ""]
