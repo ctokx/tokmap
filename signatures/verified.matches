@@ -328,3 +328,11 @@ match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?X-Influxdb-Version: v(\d+(?:\.\d+)*)|s 
 Signatures TCP TlsClientHello
 match http m|^\x16\x03[\x01-\x04].*?\x06\x03U\x04\x03\x13\x14TRAEFIK DEFAULT CERT|s p/Traefik/
 # END traefik
+
+# BEGIN elasticsearch
+# tested: elasticsearch:9.5.2 elasticsearch@sha256:d768a0096542cf868dae37ad4bee528b8dc15d0476d4a82e1f98f17950dd0f80
+# tested: elasticsearch:9.5.3 elasticsearch@sha256:e23d4758358a4e356cc2ef3259a5a6f345cacc1722c10dffe6d7150a1a78e52f
+Signatures TCP TlsClientHello
+match http m|^\x16\x03[\x01-\x04].*?Elasticsearch security auto-configuration HTTP CA|s p/Elasticsearch/
+match elasticsearch m|^\x16\x03[\x01-\x04].*?Elasticsearch security auto-configuration transport CA|s p/Elasticsearch/
+# END elasticsearch
