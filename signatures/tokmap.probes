@@ -70,6 +70,19 @@ rarity 6
 ports 5000
 sslports 5000
 
+# Nextcloud status endpoint, in its admin manual
+Probe TCP HttpNextcloudStatus q|GET /status.php HTTP/1.1\r\nHost: localhost\r\nUser-Agent: tokmap\r\nAccept: */*\r\nConnection: close\r\n\r\n|
+rarity 6
+
+# Solr system information API, in its reference guide
+Probe TCP HttpSolrSystem q|GET /solr/admin/info/system HTTP/1.1\r\nHost: localhost\r\nUser-Agent: tokmap\r\nAccept: */*\r\nConnection: close\r\n\r\n|
+rarity 6
+ports 8983
+
+# WordPress setup page, served until the site is set up; read only
+Probe TCP HttpWordPressInstall q|GET /wp-admin/install.php HTTP/1.1\r\nHost: localhost\r\nUser-Agent: tokmap\r\nAccept: */*\r\nConnection: close\r\n\r\n|
+rarity 6
+
 # bare line endings, which text protocols answer with an error
 Probe TCP Lines q|\r\n\r\n|
 rarity 1
