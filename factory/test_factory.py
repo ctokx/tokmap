@@ -136,6 +136,20 @@ class DraftTests(unittest.TestCase):
         self.assertEqual(version_of(entry, "latest"), "2.0.0")
         self.assertEqual(version_of(entry, "vanilla"), "vanilla")
 
+    def test_context_stops_at_the_end_of_the_version_line(self):
+        def info(version, next_line):
+            return f"# Server\r\nvalkey_version:{version}\r\n{next_line}:x\r\n".encode()
+        pattern = versioned_pattern([("8.0.2", info("8.0.2", "redis_git_sha1")), ("7.2.7", info("7.2.7", "redis_git_sha1"))])
+        self.assertEqual(matches(pattern, info("8.1.0", "server_mode")).group(1), b"8.1.0")
+
+    def test_binary_context_starts_at_the_field_name(self):
+        def build(version, built):
+            return (b"\x02buildDate\x00\x15\x00\x00\x00" + built.encode() + b"\x00\x02ferretdbVersion\x00\x08\x00\x00\x00v"
+                    + version.encode() + b"\x00")
+        pattern = versioned_pattern([("1.24.0", build("1.24.0", "2024-08-28T14:41:28Z")),
+                                     ("1.23.1", build("1.23.1", "2024-07-30T10:22:18Z"))])
+        self.assertEqual(matches(pattern, build("1.22.0", "2024-07-01T09:00:05Z")).group(1), b"1.22.0")
+
     def test_too_little_context_is_refused(self):
         self.assertIsNone(versioned_pattern([("1.2", b"1.2"), ("1.3", b"1.3")]))
         self.assertIsNone(versioned_pattern([("1.2", b"no version here")]))

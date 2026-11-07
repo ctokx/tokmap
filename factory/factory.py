@@ -144,7 +144,17 @@ def versioned_pattern(samples, names=()):
     separator = max(before.rfind(b","), before.rfind(b"{"))
     if separator >= 0 and len(before) - separator - 1 >= MIN_BEFORE:
         before = before[separator + 1:]
+    # In binary replies, start at the field's name: bytes before it, such as the tail of a
+    # timestamp in the previous field, can match by chance.
+    if b"\x00" in before:
+        fields = list(re.finditer(rb"[\x20-\x7e]{4,}", before))
+        if fields:
+            before = before[fields[-1].start():]
     after = common_prefix(suffixes)[:MAX_AFTER]
+    # The next line or field may change between releases, so stop at the end of this one.
+    end = re.search(rb"\r?\n|,|\x00", after)
+    if end:
+        after = after[:end.end()]
 
     if len(start) + len(before) + len(after) < MIN_LITERAL:
         return None
