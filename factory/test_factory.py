@@ -122,6 +122,8 @@ class DraftTests(unittest.TestCase):
         self.assertTrue(version_matches("18.6 or later", "18.7"))
         self.assertTrue(version_matches("17.x", "17.4"))
         self.assertFalse(version_matches("17.x", "18.0"))
+        self.assertTrue(version_matches("6.73.x", "6.73.0"))
+        self.assertFalse(version_matches("6.73.x", "6.7.3"))
 
     def test_table_signatures_read_the_version_and_fall_back_to_the_product(self):
         samples = [("16.4", self.pg_error(2145)), ("16.6", self.pg_error(2145)), ("15.10", self.pg_error(2198))]

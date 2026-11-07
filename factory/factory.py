@@ -513,14 +513,15 @@ def identify(matches):
 
 def version_matches(found, truth):
     """Whether a reported version or range contains the true version: `a-b`, `a, b`,
-    `a or earlier` and `a or later` within a's major version, or `17.x`."""
+    `a or earlier` and `a or later` within a's major version, or a prefix such as `17.x` or `6.73.x`."""
     if not found or not truth:
         return found == truth
     key = version_key(truth)
     if found == truth or truth in [v.strip() for v in found.split(",")]:
         return True
-    if m := re.fullmatch(r"(\d+)\.x", found):
-        return key[:1] == (int(m.group(1)),)
+    if m := re.fullmatch(r"(\d+(?:\.\d+)*)\.x", found):
+        prefix = version_key(m.group(1))
+        return key[:len(prefix)] == prefix
     if m := re.fullmatch(r"([\d.]+) or (earlier|later)", found):
         bound = version_key(m.group(1))
         return key[:1] == bound[:1] and (key <= bound if m.group(2) == "earlier" else key >= bound)
