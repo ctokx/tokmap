@@ -70,8 +70,20 @@ impl OutputFormatter {
                 }
             }
 
+            if let Some(ref mac) = host.mac {
+                println!("MAC Address: {}{}", mac,
+                    host.vendor.as_ref().map(|v| format!(" ({})", v)).unwrap_or_default());
+            }
             if let Some(ref os) = host.os_guess {
                 println!("OS guess: {}", os);
+            }
+            if let Some(ref hops) = host.trace {
+                println!("TRACEROUTE");
+                for hop in hops {
+                    let ip = hop.ip.map_or("*".to_string(), |ip| ip.to_string());
+                    let rtt = hop.rtt_ms.map_or(String::new(), |ms| format!("{} ms", ms));
+                    println!("{:>3}  {:<10} {}", hop.ttl, rtt, ip);
+                }
             }
             if let Some(ref fp) = host.os_fingerprint {
                 println!("OS fingerprint: {}", fp);
@@ -114,10 +126,18 @@ impl OutputFormatter {
         for host in &results.targets {
             output.push_str(&format!("  <host starttime=\"{}\">\n", results.timestamp));
             output.push_str("    <status state=\"up\"/>\n");
-            output.push_str(&format!("    <address addr=\"{}\" addrtype=\"ipv4\"/>\n", host.ip));
+            let addrtype = if host.ip.is_ipv4() { "ipv4" } else { "ipv6" };
+            output.push_str(&format!("    <address addr=\"{}\" addrtype=\"{}\"/>\n", host.ip, addrtype));
+            if let Some(ref mac) = host.mac {
+                output.push_str(&format!("    <address addr=\"{}\" addrtype=\"mac\"", xml_escape(mac)));
+                if let Some(ref vendor) = host.vendor {
+                    output.push_str(&format!(" vendor=\"{}\"", xml_escape(vendor)));
+                }
+                output.push_str("/>\n");
+            }
 
             if let Some(ref hostname) = host.hostname {
-                output.push_str(&format!("    <hostnames><hostname name=\"{}\"/></hostnames>\n", hostname));
+                output.push_str(&format!("    <hostnames><hostname name=\"{}\"/></hostnames>\n", xml_escape(hostname)));
             }
 
             output.push_str("    <ports>\n");
@@ -132,9 +152,9 @@ impl OutputFormatter {
                 output.push_str(&format!("        <state state=\"{}\"/>\n", state_to_string(&port.state)));
 
                 if let Some(ref svc) = port.service {
-                    output.push_str(&format!("        <service name=\"{}\"", svc.service_name));
+                    output.push_str(&format!("        <service name=\"{}\"", xml_escape(&svc.service_name)));
                     if let Some(ref ver) = svc.version {
-                        output.push_str(&format!(" version=\"{}\"", ver));
+                        output.push_str(&format!(" version=\"{}\"", xml_escape(ver)));
                     }
                     output.push_str("/>\n");
                 }
@@ -143,7 +163,7 @@ impl OutputFormatter {
             output.push_str("    </ports>\n");
 
             if let Some(ref os) = host.os_guess {
-                output.push_str(&format!("    <os><osmatch name=\"{}\"/></os>\n", os));
+                output.push_str(&format!("    <os><osmatch name=\"{}\"/></os>\n", xml_escape(os)));
             }
 
             output.push_str("  </host>\n");
@@ -268,6 +288,21 @@ fn print_port_line(port: &crate::types::PortResult) {
         port.port, protocol, state_str, service_name, version_str);
 }
 
+/// Service names and versions come from network replies, so they must not be able to break the XML.
+fn xml_escape(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control())
+        .map(|c| match c {
+            '&' => "&amp;".to_string(),
+            '<' => "&lt;".to_string(),
+            '>' => "&gt;".to_string(),
+            '"' => "&quot;".to_string(),
+            '\'' => "&apos;".to_string(),
+            other => other.to_string(),
+        })
+        .collect()
+}
+
 fn state_to_string(state: &PortState) -> String {
     match state {
         PortState::Open => "open".to_string(),
@@ -311,11 +346,19 @@ mod tests {
                 scan_duration_ms: 150,
                 os_guess: None,
                 os_fingerprint: None,
+                mac: None,
+                vendor: None,
+                trace: None,
             }],
             total_duration_ms: 200,
             scan_type: "SYN".to_string(),
             timestamp: "2026-02-04T12:00:00Z".to_string(),
         }
+    }
+
+    #[test]
+    fn hostile_service_text_cannot_break_the_xml() {
+        assert_eq!(xml_escape("a\"/><x y='1'>&\u{1}"), "a&quot;/&gt;&lt;x y=&apos;1&apos;&gt;&amp;");
     }
 
     #[test]

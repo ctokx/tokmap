@@ -1,4 +1,4 @@
-use regex::Regex;
+use pcre2::bytes::Regex;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
@@ -15,21 +15,39 @@ impl ServiceDatabase {
         }
     }
 
-    pub fn get_probes_for_port(&self, port: u16) -> Vec<&Probe> {
+    /// TCP probes for a port, best first: the empty probe, probes registered for the port,
+    /// then the rest up to `intensity`. `tunnel` means the probes will run inside TLS.
+    pub fn probes_for(&self, port: u16, tunnel: bool, intensity: u8) -> Vec<&Probe> {
         if self.excluded_ports.contains(&port) {
             return Vec::new();
         }
 
-        self.probes
-            .iter()
-            .filter(|probe| {
-                if let Some(ref ports) = probe.ports {
-                    ports.contains(&port)
-                } else {
-                    true
-                }
-            })
+        let registered = |probe: &Probe| {
+            let ports = if tunnel { &probe.ssl_ports } else { &probe.ports };
+            ports.as_ref().is_some_and(|ports| ports.contains(&port))
+        };
+        let tcp = || self.probes.iter().filter(|p| p.protocol == Protocol::TCP);
+
+        tcp()
+            .filter(|p| p.payload.is_empty())
+            .chain(tcp().filter(|p| !p.payload.is_empty() && registered(p)))
+            .chain(tcp().filter(|p| !p.payload.is_empty() && !registered(p) && p.rarity <= intensity))
             .collect()
+    }
+
+    /// UDP probes for a port: registered ones first, then the rest up to `intensity`.
+    pub fn udp_probes_for(&self, port: u16, intensity: u8) -> Vec<&Probe> {
+        let udp = || self.probes.iter().filter(|p| p.protocol == Protocol::UDP);
+        let registered = |probe: &Probe| probe.ports.as_ref().is_some_and(|ports| ports.contains(&port));
+
+        udp()
+            .filter(|p| registered(p))
+            .chain(udp().filter(|p| !registered(p) && p.rarity <= intensity))
+            .collect()
+    }
+
+    pub fn probe(&self, name: &str) -> Option<&Probe> {
+        self.probes.iter().find(|p| p.name == name)
     }
 }
 
@@ -48,6 +66,8 @@ pub struct Probe {
     pub tcp_wrapped_ms: Option<u64>,
     pub ports: Option<Vec<u16>>,
     pub ssl_ports: Option<Vec<u16>>,
+    pub rarity: u8,
+    pub fallback: Vec<String>,
     pub matches: Vec<Match>,
     pub soft_matches: Vec<Match>,
 }

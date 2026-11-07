@@ -1,12 +1,18 @@
+use crate::connect::{Answer, Limits, Transport};
+use futures::stream::{self, FuturesUnordered, StreamExt};
 use std::net::{IpAddr, SocketAddr};
-use std::time::Duration;
-use tokio::net::TcpStream;
+use std::time::{Duration, Instant};
 use tracing::debug;
+
+/// Answering on any of these, even with a refusal, proves the host is up.
+const PING_PORTS: &[u16] = &[80, 443, 22, 445, 3389, 135];
+/// Also ping a few requested ports: they may be all a filtered host answers on.
+const SCAN_PORTS_PINGED: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DiscoveryMethod {
     None,         // -Pn: skip discovery, treat all as up
-    Default,      // ICMP echo + TCP SYN 443 + TCP ACK 80 + ICMP timestamp
+    Default,      // TCP connect to common ports
     PingScanOnly, // -sn: ping scan only, no port scan
     TcpSyn,       // -PS
     TcpAck,       // -PA
@@ -25,91 +31,55 @@ pub async fn discover_hosts(
     targets: &[IpAddr],
     method: DiscoveryMethod,
     timeout: Duration,
+    scan_ports: &[u16],
+    limits: &Limits,
 ) -> Vec<DiscoveryResult> {
-    match method {
-        DiscoveryMethod::None => {
-            targets
+    let ports: Vec<u16> = match method {
+        DiscoveryMethod::None | DiscoveryMethod::Arp => {
+            let label = if method == DiscoveryMethod::Arp { "arp" } else { "no-ping" };
+            return targets
                 .iter()
                 .map(|ip| DiscoveryResult {
                     ip: *ip,
                     is_up: true,
                     latency_ms: None,
-                    method: "no-ping".to_string(),
+                    method: label.to_string(),
                 })
-                .collect()
+                .collect();
         }
-        DiscoveryMethod::PingScanOnly | DiscoveryMethod::Default => {
-            let mut results = Vec::new();
-            for &ip in targets {
-                let result = tcp_ping(ip, &[80, 443, 22], timeout).await;
-                results.push(result);
-            }
-            results
-        }
-        DiscoveryMethod::TcpSyn => {
-            let mut results = Vec::new();
-            for &ip in targets {
-                let result = tcp_ping(ip, &[80, 443], timeout).await;
-                results.push(result);
-            }
-            results
-        }
-        DiscoveryMethod::TcpAck => {
-            let mut results = Vec::new();
-            for &ip in targets {
-                let result = tcp_ping(ip, &[80], timeout).await;
-                results.push(result);
-            }
-            results
-        }
-        DiscoveryMethod::Arp => {
-            // ARP is handled at the scanner level
-            targets
-                .iter()
-                .map(|ip| DiscoveryResult {
-                    ip: *ip,
-                    is_up: true,
-                    latency_ms: None,
-                    method: "arp".to_string(),
-                })
-                .collect()
-        }
-    }
+        DiscoveryMethod::PingScanOnly | DiscoveryMethod::Default => PING_PORTS
+            .iter()
+            .chain(scan_ports.iter().take(SCAN_PORTS_PINGED))
+            .copied()
+            .collect(),
+        DiscoveryMethod::TcpSyn => vec![80, 443],
+        DiscoveryMethod::TcpAck => vec![80],
+    };
+
+    stream::iter(targets)
+        .map(|&ip| tcp_ping(ip, &ports, timeout, limits))
+        .buffer_unordered(limits.max_sockets)
+        .collect()
+        .await
 }
 
-async fn tcp_ping(ip: IpAddr, ports: &[u16], timeout: Duration) -> DiscoveryResult {
-    let start = std::time::Instant::now();
+async fn tcp_ping(ip: IpAddr, ports: &[u16], timeout: Duration, limits: &Limits) -> DiscoveryResult {
+    let start = Instant::now();
 
-    for &port in ports {
-        let addr = SocketAddr::new(ip, port);
-        match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
-            Ok(Ok(_stream)) => {
-                let latency = start.elapsed().as_millis() as u64;
-                debug!("Host {} is up (TCP connect to port {})", ip, port);
-                return DiscoveryResult {
-                    ip,
-                    is_up: true,
-                    latency_ms: Some(latency),
-                    method: format!("tcp-syn-{}", port),
-                };
-            }
-            Ok(Err(e)) => {
-                // Connection refused = host is up (port closed but host responds)
-                let err_str = format!("{}", e);
-                if err_str.contains("refused") || err_str.contains("reset") {
-                    let latency = start.elapsed().as_millis() as u64;
-                    debug!("Host {} is up (connection refused on port {})", ip, port);
-                    return DiscoveryResult {
-                        ip,
-                        is_up: true,
-                        latency_ms: Some(latency),
-                        method: format!("tcp-rst-{}", port),
-                    };
-                }
-            }
-            Err(_) => {
-                continue;
-            }
+    let mut attempts: FuturesUnordered<_> = ports
+        .iter()
+        .map(|&port| async move { (port, limits.probe(SocketAddr::new(ip, port), timeout, Transport::Tcp).await) })
+        .collect();
+
+    while let Some((port, answer)) = attempts.next().await {
+        if answer != Answer::Silent {
+            debug!("Host {} is up ({:?} on port {})", ip, answer, port);
+            return DiscoveryResult {
+                ip,
+                is_up: true,
+                latency_ms: Some(start.elapsed().as_millis() as u64),
+                method: format!("tcp-{}", port),
+            };
         }
     }
 
@@ -119,5 +89,26 @@ async fn tcp_ping(ip: IpAddr, ports: &[u16], timeout: Duration) -> DiscoveryResu
         is_up: false,
         latency_ms: None,
         method: "no-response".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn refused_ports_prove_a_host_is_up() {
+        let targets: Vec<IpAddr> = vec!["127.0.0.1".parse().unwrap()];
+        let limits = Limits::new(16, None);
+        let found = discover_hosts(&targets, DiscoveryMethod::Default, Duration::from_secs(1), &[], &limits).await;
+        assert!(found[0].is_up);
+    }
+
+    #[tokio::test]
+    async fn no_ping_marks_every_target_up_without_probing() {
+        let targets: Vec<IpAddr> = vec!["192.0.2.1".parse().unwrap()];
+        let limits = Limits::new(1, None);
+        let found = discover_hosts(&targets, DiscoveryMethod::None, Duration::from_secs(1), &[], &limits).await;
+        assert!(found[0].is_up);
     }
 }

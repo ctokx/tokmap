@@ -1,6 +1,10 @@
 use anyhow::{Context, Result};
-use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+use std::time::Duration;
 use tracing::info;
+
+const MAX_RANGE_HOSTS: u128 = 65536;
+const REVERSE_DNS_WAIT: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone)]
 pub struct TargetSpec {
@@ -22,7 +26,7 @@ pub fn parse_targets(specs: &[String]) -> Result<Vec<IpAddr>> {
         }
     }
 
-    targets.sort_by(|a, b| format!("{}", a).cmp(&format!("{}", b)));
+    targets.sort();
     targets.dedup();
 
     Ok(targets)
@@ -33,7 +37,9 @@ fn parse_single_target(spec: &str) -> Result<Vec<IpAddr>> {
         return parse_cidr(spec);
     }
 
-    if spec.contains('-') && spec.chars().filter(|c| *c == '.').count() == 3 {
+    // Hostnames contain hyphens and dots too, so only dotted numbers count as a range.
+    let dotted = spec.split('.').collect::<Vec<_>>();
+    if spec.contains('-') && dotted.len() == 4 && dotted[..3].iter().all(|o| o.parse::<u8>().is_ok()) {
         return parse_ip_range(spec);
     }
 
@@ -48,6 +54,10 @@ fn parse_cidr(spec: &str) -> Result<Vec<IpAddr>> {
     let parts: Vec<&str> = spec.split('/').collect();
     if parts.len() != 2 {
         anyhow::bail!("Invalid CIDR notation: {}", spec);
+    }
+
+    if parts[0].contains(':') {
+        return parse_cidr_v6(parts[0], parts[1]);
     }
 
     let base_ip: Ipv4Addr = parts[0].parse()
@@ -82,6 +92,22 @@ fn parse_cidr(spec: &str) -> Result<Vec<IpAddr>> {
 
     info!("CIDR {} expanded to {} hosts", spec, targets.len());
     Ok(targets)
+}
+
+fn parse_cidr_v6(base: &str, prefix: &str) -> Result<Vec<IpAddr>> {
+    let base_ip: Ipv6Addr = base.parse().context(format!("Invalid IP in CIDR: {}", base))?;
+    let prefix_len: u32 = prefix.parse().context(format!("Invalid prefix length: {}", prefix))?;
+    if prefix_len > 128 {
+        anyhow::bail!("Invalid prefix length: {} (must be 0-128)", prefix_len);
+    }
+
+    let host_bits = 128 - prefix_len;
+    if host_bits > 16 {
+        anyhow::bail!("IPv6 CIDR /{} is too large to scan. Maximum is /112 ({} hosts).", prefix_len, MAX_RANGE_HOSTS);
+    }
+
+    let network = u128::from(base_ip) & (u128::MAX << host_bits);
+    Ok((0..1u128 << host_bits).map(|i| IpAddr::V6(Ipv6Addr::from(network + i))).collect())
 }
 
 fn parse_ip_range(spec: &str) -> Result<Vec<IpAddr>> {
@@ -136,9 +162,12 @@ fn resolve_hostname(hostname: &str) -> Result<Vec<IpAddr>> {
     }
 }
 
-// TODO: implement proper reverse DNS lookup
-pub fn reverse_dns(_ip: IpAddr) -> Option<String> {
-    None
+/// The PTR name for an address, if the OS resolver has one quickly.
+pub async fn reverse_dns(ip: IpAddr) -> Option<String> {
+    let lookup = move || dns_lookup::lookup_addr(&ip).ok();
+    let name = crate::route::on_capture_thread(REVERSE_DNS_WAIT, lookup).await.flatten()?;
+    // Without a PTR record the resolver hands the address back as text.
+    (name != ip.to_string()).then_some(name)
 }
 
 #[cfg(test)]
@@ -178,6 +207,31 @@ mod tests {
     fn test_parse_comma_separated() {
         let result = parse_targets(&["192.168.1.1,192.168.1.2".to_string()]).unwrap();
         assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn hyphenated_hostnames_are_not_ranges() {
+        let error = parse_single_target("my-app.prod.example.invalid").unwrap_err();
+        assert!(error.to_string().contains("resolve"));
+    }
+
+    #[test]
+    fn ipv6_ranges_expand_from_the_network_base() {
+        let hosts = parse_targets(&["fd00::5/126".to_string()]).unwrap();
+        assert_eq!(hosts.len(), 4);
+        assert_eq!(hosts[0], "fd00::4".parse::<IpAddr>().unwrap());
+        assert_eq!(hosts[3], "fd00::7".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn oversized_ipv6_ranges_are_refused() {
+        assert!(parse_targets(&["fd00::/64".to_string()]).is_err());
+    }
+
+    #[test]
+    fn targets_sort_numerically() {
+        let hosts = parse_targets(&["10.0.0.10,10.0.0.9".to_string()]).unwrap();
+        assert_eq!(hosts[0], "10.0.0.9".parse::<IpAddr>().unwrap());
     }
 
     #[test]

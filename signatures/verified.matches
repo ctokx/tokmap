@@ -1,0 +1,2 @@
+# Signatures proven against recordings of real software. Written by factory/factory.py accept.
+# Each block names the probe it extends, the images and tags it was tested on, and their digests.

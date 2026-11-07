@@ -1,7 +1,6 @@
 # Build
 **/target/
 **/*.rs.bk
-Cargo.lock
 .cargo/
 
 # IDE
@@ -60,3 +59,11 @@ UsersvarolDesktoptokmapnmap-service-probes
 *.key
 *.pem
 credentials*
+
+# Signature factory working data
+factory/evidence/
+factory/drafts/
+__pycache__/
+
+# IEEE vendor registry, downloaded separately
+oui.csv

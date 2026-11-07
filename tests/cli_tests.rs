@@ -37,7 +37,7 @@ mod cli_integration_tests {
 
         if let Ok(output) = output {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            assert!(stdout.contains("0.1"));
+            assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
         }
     }
 

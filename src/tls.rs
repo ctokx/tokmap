@@ -1,12 +1,16 @@
 use anyhow::Result;
 use rustls::ClientConfig;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use std::time::Duration;
+use crate::types::format_utc;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
+use x509_parser::prelude::{ASN1Time, FromDer, GeneralName, X509Certificate};
+
+const SECONDS_PER_DAY: i64 = 86400;
 
 const COMMON_SSL_PORTS: &[u16] = &[
     443, 465, 636, 853, 989, 990, 993, 995, 2083, 2087, 2096, 2484,
@@ -22,6 +26,8 @@ pub struct TlsCertInfo {
     pub san: Vec<String>,
     pub version: String,
     pub cipher_suite: Option<String>,
+    /// Negative once the certificate has expired.
+    pub days_until_expiry: Option<i64>,
 }
 
 pub fn is_likely_ssl_port(port: u16) -> bool {
@@ -35,20 +41,27 @@ pub fn is_ssl_port_for_probe(port: u16, ssl_ports: Option<&Vec<u16>>) -> bool {
     is_likely_ssl_port(port)
 }
 
+/// Built once: a scan does thousands of handshakes and the config never changes.
+fn client_config() -> Arc<ClientConfig> {
+    static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            Arc::new(
+                ClientConfig::builder()
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(NoVerifier))
+                    .with_no_client_auth(),
+            )
+        })
+        .clone()
+}
+
 pub async fn tls_connect(
     ip: IpAddr,
     port: u16,
     connect_timeout: Duration,
 ) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, Option<TlsCertInfo>)> {
-    let mut root_store = rustls::RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-    let config = ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(NoVerifier))
-        .with_no_client_auth();
-
-    let connector = TlsConnector::from(Arc::new(config));
+    let connector = TlsConnector::from(client_config());
     let addr = SocketAddr::new(ip, port);
 
     let tcp = timeout(connect_timeout, TcpStream::connect(addr)).await??;
@@ -66,37 +79,6 @@ pub async fn tls_connect(
     let cert_info = extract_cert_info(&tls_stream);
 
     Ok((tls_stream, cert_info))
-}
-
-pub async fn tls_probe_service(
-    ip: IpAddr,
-    port: u16,
-    probe_payload: &[u8],
-    connect_timeout: Duration,
-) -> Result<(Vec<u8>, Option<TlsCertInfo>)> {
-    let (mut tls_stream, cert_info) = tls_connect(ip, port, connect_timeout).await?;
-
-    if !probe_payload.is_empty() {
-        tls_stream.write_all(probe_payload).await?;
-    }
-
-    let mut buffer = vec![0u8; 4096];
-    let mut total_read = 0;
-
-    loop {
-        match timeout(Duration::from_millis(800), tls_stream.read(&mut buffer[total_read..])).await {
-            Ok(Ok(0)) => break,
-            Ok(Ok(n)) => {
-                total_read += n;
-                if total_read >= 4096 {
-                    break;
-                }
-            }
-            _ => break,
-        }
-    }
-
-    Ok((buffer[..total_read].to_vec(), cert_info))
 }
 
 pub async fn tls_grab_banner(
@@ -140,31 +122,51 @@ fn extract_cert_info(tls_stream: &tokio_rustls::client::TlsStream<TcpStream>) ->
         _ => "Unknown",
     };
 
-    let (subject, issuer, not_before, not_after, san) = parse_der_cert(cert.as_ref());
-
-    Some(TlsCertInfo {
-        subject,
-        issuer,
-        not_before,
-        not_after,
-        san,
-        version: tls_version.to_string(),
-        cipher_suite: cipher,
-    })
+    let mut info = parse_der_cert(cert.as_ref());
+    info.version = tls_version.to_string();
+    info.cipher_suite = cipher;
+    Some(info)
 }
 
-fn parse_der_cert(der: &[u8]) -> (Option<String>, Option<String>, Option<String>, Option<String>, Vec<String>) {
-    let mut subject = None;
-    let mut issuer = None;
-    let san = Vec::new();
+fn parse_der_cert(der: &[u8]) -> TlsCertInfo {
+    let mut info = TlsCertInfo {
+        subject: None,
+        issuer: None,
+        not_before: None,
+        not_after: None,
+        san: Vec::new(),
+        version: String::new(),
+        cipher_suite: None,
+        days_until_expiry: None,
+    };
+    let Ok((_, cert)) = X509Certificate::from_der(der) else { return info };
 
-    if der.len() > 10 {
-        let hex_preview = der.iter().take(20).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(":");
-        subject = Some(format!("DER cert ({}...)", hex_preview));
-        issuer = Some("See certificate details".to_string());
+    let as_date = |time: ASN1Time| u64::try_from(time.timestamp()).ok().map(format_utc);
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+
+    info.subject = Some(cert.subject().to_string());
+    info.issuer = Some(cert.issuer().to_string());
+    info.not_before = as_date(cert.validity().not_before);
+    info.not_after = as_date(cert.validity().not_after);
+    info.days_until_expiry = Some((cert.validity().not_after.timestamp() - now) / SECONDS_PER_DAY);
+
+    if let Ok(Some(names)) = cert.subject_alternative_name() {
+        for name in &names.value.general_names {
+            match name {
+                GeneralName::DNSName(dns) => info.san.push(dns.to_string()),
+                GeneralName::IPAddress(bytes) => info.san.extend(ip_from_bytes(bytes)),
+                _ => {}
+            }
+        }
     }
+    info
+}
 
-    (subject, issuer, None, None, san)
+fn ip_from_bytes(bytes: &[u8]) -> Option<String> {
+    if let Ok(v4) = <[u8; 4]>::try_from(bytes) {
+        return Some(IpAddr::from(v4).to_string());
+    }
+    <[u8; 16]>::try_from(bytes).ok().map(|v6| IpAddr::from(v6).to_string())
 }
 
 #[derive(Debug)]
@@ -222,6 +224,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn certificate_fields_are_read() {
+        let info = parse_der_cert(include_bytes!("../tests/fixtures/test-cert.der"));
+        assert!(info.subject.as_deref().unwrap().contains("CN=test.example"));
+        assert_eq!(info.subject, info.issuer, "self-signed");
+        assert_eq!(info.san, ["test.example", "www.test.example", "192.0.2.7"]);
+        assert!(info.not_after.as_deref().unwrap() > info.not_before.as_deref().unwrap());
+        assert!(info.days_until_expiry.unwrap() > 0);
+    }
+
+    #[test]
+    fn garbage_is_not_a_certificate() {
+        let info = parse_der_cert(b"not a certificate");
+        assert_eq!(info.subject, None);
+        assert_eq!(info.days_until_expiry, None);
+    }
+
+    #[test]
     fn test_is_likely_ssl_port() {
         assert!(is_likely_ssl_port(443));
         assert!(is_likely_ssl_port(8443));
@@ -249,6 +268,7 @@ mod tests {
             san: vec!["example.com".to_string(), "www.example.com".to_string()],
             version: "TLSv1.3".to_string(),
             cipher_suite: Some("TLS13_AES_256_GCM_SHA384".to_string()),
+            days_until_expiry: Some(30),
         };
         let json = serde_json::to_string(&info).unwrap();
         assert!(json.contains("example.com"));

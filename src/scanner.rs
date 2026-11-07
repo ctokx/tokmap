@@ -1,30 +1,108 @@
+use crate::connect::{self, Answer, Limits, Transport};
+use crate::discovery::{discover_hosts, DiscoveryMethod};
 use crate::llm::LLMAnalyzer;
 use crate::os_db::{OSDatabase, ObservedFingerprint};
 use crate::os_probe::{build_observed_fingerprint, find_closed_port, find_open_port, send_os_probes};
-use crate::packet::{build_ether_syn_packet, parse_tcp_response, random_source_port, TcpResponseType, TcpFingerprint};
+use crate::packet::{
+    build_probe_frame, interpret_response, parse_reply, random_source_port, silent_port_state,
+    Reply, TcpFingerprint,
+};
+use crate::route::{self, open_capture};
 use crate::service;
 use crate::service_db::ServiceMatcher;
-use crate::types::{HostResult, PortResult, PortState, ScanConfig, ScanResults};
+use crate::target::reverse_dns;
+use crate::trace::{self, TraceRoute};
+use crate::types::{
+    format_utc, Hop, HostResult, PortResult, PortState, Protocol, ScanConfig, ScanResults, ScanType,
+};
+use crate::vendors::Vendors;
 use anyhow::Result;
-use pnet::datalink::{self, NetworkInterface, DataLinkReceiver};
-use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
-use pnet::packet::ip::IpNextHeaderProtocols;
-use pnet::packet::ipv4::Ipv4Packet;
-use pnet::packet::arp::{ArpOperations, ArpPacket, MutableArpPacket};
-use pnet::packet::Packet;
+use futures::stream::{self, StreamExt};
+use pnet::datalink::{self, DataLinkReceiver, DataLinkSender, NetworkInterface};
 use pnet::util::MacAddr;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, info, warn};
+
+const HOST_PARALLELISM: usize = 64;
+/// Each raw host opens its own capture handle, and every handle sees all traffic.
+const RAW_HOST_PARALLELISM: usize = 8;
+const PORT_PARALLELISM: usize = 32;
+/// One sender tops out near 16k packets/s on Windows, so large sweeps get several. Elsewhere one
+/// is plenty, and every extra capture socket makes the kernel copy each packet again.
+const PORTS_PER_SENDER: usize = 8192;
+const MAX_SENDERS: usize = if cfg!(windows) { 4 } else { 1 };
+/// Unanswered probes allowed at once. A Linux capture socket buffers only a few hundred packets,
+/// so sending faster than replies are read loses them, and a lost reply is a wrong answer.
+const PROBE_WINDOW: isize = 256;
+const MIN_PROBE_WINDOW: isize = 8;
+/// How long a full window may block before its probes are written off as silent ports.
+const WINDOW_STALL: Duration = Duration::from_millis(5);
+/// Once a host is answering, this much silence means the remaining ports are not going to.
+const MIN_QUIET_WAIT: Duration = Duration::from_millis(100);
+const NORMAL_TTL: u8 = 64;
+const TRACE_WAIT: Duration = Duration::from_secs(2);
+const TRACE_DEFAULT_PORT: u16 = 80;
+const VENDOR_FILE: &str = "oui.csv";
 
 pub struct Scanner {
     config: ScanConfig,
     service_matcher: Option<ServiceMatcher>,
     os_db: Option<OSDatabase>,
     llm_provider_name: Option<String>,
+    limits: Limits,
+    raw_slots: Arc<Semaphore>,
+    interfaces: OnceLock<Vec<NetworkInterface>>,
+    vendors: OnceLock<Option<Vendors>>,
+    known_macs: Mutex<HashMap<IpAddr, MacAddr>>,
+    gateways: tokio::sync::Mutex<HashMap<(String, bool), Option<MacAddr>>>,
+    used_raw: AtomicBool,
+    used_connect: AtomicBool,
+}
+
+/// How this machine reaches a target at the Ethernet level.
+#[derive(Clone)]
+struct Link {
+    interface: NetworkInterface,
+    src_ip: IpAddr,
+    src_mac: MacAddr,
+    on_link: bool,
+}
+
+/// What a raw scan needs. Only targets with a known next hop get one.
+struct RawRoute {
+    link: Link,
+    target: IpAddr,
+    dst_mac: MacAddr,
+    _slot: OwnedSemaphorePermit,
+}
+
+#[derive(Default)]
+struct ScannedPorts {
+    ports: Vec<PortResult>,
+    os_guess: Option<String>,
+    os_fingerprint: Option<String>,
+    mac: Option<MacAddr>,
+    trace: Option<Vec<Hop>>,
+}
+
+fn port_result(port: u16, state: PortState, latency_ms: Option<u64>, protocol: Protocol) -> PortResult {
+    PortResult {
+        port,
+        state,
+        latency_ms,
+        service: None,
+        llm_analysis: None,
+        protocol: Some(protocol),
+    }
+}
+
+fn is_link_local(ip: IpAddr) -> bool {
+    matches!(ip, IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfe80)
 }
 
 impl Scanner {
@@ -33,511 +111,765 @@ impl Scanner {
     }
 
     pub fn with_llm_provider(config: ScanConfig, llm_provider: Option<String>) -> Self {
-        let matcher = match ServiceMatcher::load_default() {
-            Ok(m) => {
-                info!("Loaded Nmap service signature database");
-                Some(m)
-            },
-            Err(e) => {
-                warn!("Failed to load service matcher: {}", e);
-                info!("Service database not available, using basic detection");
-                None
-            }
-        };
+        // Loaded on demand: a plain port scan must not pay for signatures it will not use.
+        let wants_signatures = config.service_detection || config.record_dir.is_some();
+        let matcher = wants_signatures
+            .then(|| ServiceMatcher::load(&config.signature_files))
+            .and_then(|loaded| match loaded {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    warn!("Failed to load signatures: {}", e);
+                    None
+                }
+            });
 
-        let os_db = match OSDatabase::load_from_file("nmap-os-db") {
-            Ok(db) => {
-                info!("Loaded Nmap OS database");
-                Some(db)
-            },
-            Err(e) => {
-                warn!("Failed to load OS database: {}", e);
-                None
+        let os_db = config.os_detection.then(|| OSDatabase::load_from_file("nmap-os-db")).and_then(|loaded| {
+            match loaded {
+                Ok(db) => {
+                    info!("Loaded OS database");
+                    Some(db)
+                }
+                Err(e) => {
+                    warn!("Failed to load OS database: {}", e);
+                    None
+                }
             }
-        };
+        });
+
+        let limits = Limits::new(config.max_concurrent, config.rate_limit);
 
         Scanner {
             config,
             service_matcher: matcher,
             os_db,
             llm_provider_name: llm_provider,
+            limits,
+            raw_slots: Arc::new(Semaphore::new(RAW_HOST_PARALLELISM)),
+            interfaces: OnceLock::new(),
+            vendors: OnceLock::new(),
+            known_macs: Mutex::new(HashMap::new()),
+            gateways: tokio::sync::Mutex::new(HashMap::new()),
+            used_raw: AtomicBool::new(false),
+            used_connect: AtomicBool::new(false),
         }
-    }
-
-    fn find_interface_by_ip(ip: Ipv4Addr) -> Option<NetworkInterface> {
-        datalink::interfaces()
-            .into_iter()
-            .find(|iface| iface.ips.iter().any(|nw| nw.ip() == IpAddr::V4(ip)))
-    }
-
-    async fn arp_resolve(interface: &NetworkInterface, src_ip: Ipv4Addr, target_ip: Ipv4Addr) -> Result<MacAddr> {
-        let (mut tx, mut rx) = match datalink::channel(interface, Default::default()) {
-            Ok(datalink::Channel::Ethernet(tx, rx)) => (tx, rx),
-            _ => return Err(anyhow::anyhow!("Failed to create datalink channel for ARP")),
-        };
-
-        let src_mac = interface.mac.ok_or_else(|| anyhow::anyhow!("Interface has no MAC address"))?;
-
-        let mut buffer = [0u8; 42];
-        {
-            let mut eth_packet = MutableEthernetPacket::new(&mut buffer[..14]).unwrap();
-            eth_packet.set_destination(MacAddr::broadcast());
-            eth_packet.set_source(src_mac);
-            eth_packet.set_ethertype(EtherTypes::Arp);
-
-            let mut arp_packet = MutableArpPacket::new(&mut buffer[14..]).unwrap();
-            arp_packet.set_hardware_type(pnet::packet::arp::ArpHardwareTypes::Ethernet);
-            arp_packet.set_protocol_type(EtherTypes::Ipv4);
-            arp_packet.set_hw_addr_len(6);
-            arp_packet.set_proto_addr_len(4);
-            arp_packet.set_operation(ArpOperations::Request);
-            arp_packet.set_sender_hw_addr(src_mac);
-            arp_packet.set_sender_proto_addr(src_ip);
-            arp_packet.set_target_hw_addr(MacAddr::zero());
-            arp_packet.set_target_proto_addr(target_ip);
-        }
-
-        tx.send_to(&buffer, None).ok_or_else(|| anyhow::anyhow!("Failed to send ARP request"))??;
-
-        let timeout = Duration::from_secs(2);
-        let start = Instant::now();
-
-        while start.elapsed() < timeout {
-            if let Ok(packet) = rx.next() {
-                let eth = EthernetPacket::new(packet).unwrap();
-                if eth.get_ethertype() == EtherTypes::Arp {
-                    let arp = ArpPacket::new(eth.payload()).unwrap();
-                    if arp.get_operation() == ArpOperations::Reply && arp.get_sender_proto_addr() == target_ip {
-                        return Ok(arp.get_sender_hw_addr());
-                    }
-                }
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
-        Err(anyhow::anyhow!("ARP timeout for {}", target_ip))
     }
 
     pub async fn scan(&self) -> Result<ScanResults> {
         let start_time = Instant::now();
+        let targets = self.live_targets().await;
         info!(
-            "Starting SYN scan of {} targets, {} ports per target",
-            self.config.targets.len(),
-            self.config.ports.len()
+            "Scanning {} targets, {} TCP and {} UDP ports per target",
+            targets.len(),
+            if self.config.tcp_scan { self.config.ports.len() } else { 0 },
+            if self.config.udp_scan { self.config.udp_ports.len() } else { 0 },
         );
-        let mut results = Vec::new();
 
-        for target in &self.config.targets {
-            match self.scan_host(*target).await {
-                Ok(host_result) => results.push(host_result),
-                Err(e) => warn!("Failed to scan {}: {}", target, e),
-            }
-        }
-
-        let total_duration = start_time.elapsed();
+        let mut results: Vec<HostResult> = stream::iter(targets)
+            .map(|target| async move { (target, self.scan_host(target).await) })
+            .buffer_unordered(HOST_PARALLELISM)
+            .filter_map(|(target, result)| async move {
+                result.map_err(|e| warn!("Failed to scan {}: {}", target, e)).ok()
+            })
+            .collect()
+            .await;
+        results.sort_by_key(|host| host.ip);
 
         Ok(ScanResults {
             targets: results,
-            total_duration_ms: total_duration.as_millis() as u64,
-            scan_type: "SYN".to_string(),
+            total_duration_ms: start_time.elapsed().as_millis() as u64,
+            scan_type: self.scan_label(),
             timestamp: get_timestamp(),
         })
+    }
+
+    /// Names what actually ran: a SYN scan falls back to connect when no raw route exists.
+    fn scan_label(&self) -> String {
+        if self.config.ping_scan_only {
+            return "PING".to_string();
+        }
+        let tcp = self.config.tcp_scan.then(|| match self.config.scan_type {
+            ScanType::Connect => "CONNECT",
+            ScanType::Ack => "ACK",
+            ScanType::Window => "WINDOW",
+            ScanType::Fin => "FIN",
+            ScanType::Null => "NULL",
+            ScanType::Xmas => "XMAS",
+            ScanType::Syn | ScanType::Udp => {
+                match (self.used_raw.load(Ordering::Relaxed), self.used_connect.load(Ordering::Relaxed)) {
+                    (true, true) => "SYN+CONNECT",
+                    (false, true) => "CONNECT",
+                    _ => "SYN",
+                }
+            }
+        });
+        let udp = self.config.udp_scan.then_some("UDP");
+        [tcp, udp].into_iter().flatten().collect::<Vec<_>>().join("+")
+    }
+
+    async fn live_targets(&self) -> Vec<IpAddr> {
+        let targets = &self.config.targets;
+        if !self.config.host_discovery {
+            return targets.clone();
+        }
+        // Scanning one host answers the same question as pinging it first.
+        if targets.len() < 2 && !self.config.ping_scan_only {
+            return targets.clone();
+        }
+
+        let mut up: HashSet<IpAddr> = HashSet::new();
+        let mut needs_tcp_ping: Vec<IpAddr> = Vec::new();
+        let mut neighbours: HashMap<String, (Link, Vec<Ipv4Addr>)> = HashMap::new();
+        let mut remote: HashMap<String, (Link, Vec<Ipv4Addr>)> = HashMap::new();
+
+        for &target in targets {
+            let raw_allowed = self.config.scan_type != ScanType::Connect;
+            match (target, raw_allowed.then(|| self.link_to(target)).flatten()) {
+                (IpAddr::V4(ip), Some(link)) if link.src_ip.is_ipv4() => {
+                    let group = if link.on_link { &mut neighbours } else { &mut remote };
+                    if !link.on_link {
+                        needs_tcp_ping.push(target);
+                    }
+                    group.entry(link.interface.name.clone()).or_insert((link, Vec::new())).1.push(ip);
+                }
+                _ => needs_tcp_ping.push(target),
+            }
+        }
+
+        // ARP is decisive for neighbours: anything that does not answer it is not there.
+        for (link, ips) in neighbours.into_values() {
+            let IpAddr::V4(src_ip) = link.src_ip else { continue };
+            match route::arp_sweep(link.interface.clone(), link.src_mac, src_ip, ips.clone()).await {
+                Some(found) => {
+                    let mut known = self.known_macs.lock().unwrap();
+                    for (ip, mac) in found {
+                        up.insert(IpAddr::V4(ip));
+                        known.insert(IpAddr::V4(ip), mac);
+                    }
+                }
+                None => needs_tcp_ping.extend(ips.into_iter().map(IpAddr::V4)),
+            }
+        }
+
+        let pings = async {
+            let mut answered = Vec::new();
+            for (link, ips) in remote.into_values() {
+                let IpAddr::V4(src_ip) = link.src_ip else { continue };
+                let Some(&first) = ips.first() else { continue };
+                let Some(gateway) = self.next_hop(&link, IpAddr::V4(first)).await else { continue };
+                let found = route::icmp_sweep(
+                    link.interface.clone(), link.src_mac, gateway, src_ip, ips, self.config.timeout,
+                )
+                .await;
+                answered.extend(found.into_iter().flatten().map(IpAddr::V4));
+            }
+            answered
+        };
+        let tcp_pings = discover_hosts(
+            &needs_tcp_ping,
+            DiscoveryMethod::Default,
+            self.config.timeout,
+            &self.config.ports,
+            &self.limits,
+        );
+        let (answered, tcp_results) = tokio::join!(pings, tcp_pings);
+
+        up.extend(answered);
+        up.extend(tcp_results.iter().filter(|r| r.is_up).map(|r| r.ip));
+
+        let mut live: Vec<IpAddr> = up.into_iter().collect();
+        live.sort();
+        info!("Host discovery: {} of {} hosts up", live.len(), targets.len());
+        live
     }
 
     async fn scan_host(&self, target: IpAddr) -> Result<HostResult> {
         let start_time = Instant::now();
         info!("Scanning host: {}", target);
 
-        let target_v4 = match target {
-            IpAddr::V4(ip) => ip,
-            IpAddr::V6(_) => {
-                return Err(anyhow::anyhow!("IPv6 not yet supported"));
+        let name_lookup = async {
+            if self.config.resolve_dns { reverse_dns(target).await } else { None }
+        };
+        let (hostname, scanned) = tokio::join!(name_lookup, self.scan_target(target));
+        let scanned = scanned?;
+
+        let mac = scanned.mac.or_else(|| self.known_macs.lock().unwrap().get(&target).copied());
+
+        Ok(HostResult {
+            ip: target,
+            hostname,
+            ports: scanned.ports,
+            scan_duration_ms: start_time.elapsed().as_millis() as u64,
+            os_guess: scanned.os_guess,
+            os_fingerprint: scanned.os_fingerprint,
+            mac: mac.map(|m| m.to_string()),
+            vendor: mac.and_then(|m| self.vendor_of(m)),
+            trace: scanned.trace,
+        })
+    }
+
+    fn vendor_of(&self, mac: MacAddr) -> Option<String> {
+        self.vendors
+            .get_or_init(|| Vendors::load(VENDOR_FILE))
+            .as_ref()?
+            .lookup(&mac.to_string())
+            .map(str::to_string)
+    }
+
+    async fn scan_target(&self, target: IpAddr) -> Result<ScannedPorts> {
+        if self.config.ping_scan_only {
+            return Ok(ScannedPorts::default());
+        }
+
+        let scan_type = self.config.scan_type;
+        let raw_tcp = self.config.tcp_scan && scan_type != ScanType::Connect;
+        let wants_route = raw_tcp || self.config.traceroute || self.config.os_detection;
+        let route = if wants_route { self.raw_route(target).await } else { None };
+
+        let (mut ports, fingerprints) = match (&route, self.config.tcp_scan) {
+            (_, false) => (Vec::new(), Vec::new()),
+            (Some(route), true) if raw_tcp => {
+                self.used_raw.store(true, Ordering::Relaxed);
+                self.raw_sweep(route).await?
+            }
+            _ if raw_tcp && scan_type != ScanType::Syn => {
+                anyhow::bail!("{:?} scan needs raw packets, and there is no raw route to this target", scan_type);
+            }
+            _ => {
+                self.used_connect.store(true, Ordering::Relaxed);
+                (self.tcp_connect_sweep(target).await, Vec::new())
             }
         };
 
-        let src_ip = get_source_ip(target_v4)?;
-        let interface = Self::find_interface_by_ip(src_ip)
-            .ok_or_else(|| anyhow::anyhow!("Could not find interface for IP {}", src_ip))?;
+        if self.config.udp_scan {
+            ports.extend(self.udp_sweep(target).await);
+        }
 
-        let src_mac = interface.mac.ok_or_else(|| anyhow::anyhow!("Source interface has no MAC"))?;
+        self.detect_services(target, &mut ports).await;
+        self.record_responses(target, &ports).await?;
+        self.analyze_with_llm(target, &mut ports).await;
 
-        let dst_mac = match Self::arp_resolve(&interface, src_ip, target_v4).await {
-            Ok(mac) => mac,
-            Err(_) => {
-                return self.scan_host_connect(target, target_v4).await;
-            }
+        let (os_guess, os_fingerprint) = self
+            .fingerprint_os(target, route.as_ref(), &ports, &fingerprints)
+            .await?;
+
+        let trace = if self.config.traceroute {
+            self.trace_route(target, route.as_ref(), &ports).await
+        } else {
+            None
         };
 
-        let (mut tx, rx) = match datalink::channel(&interface, Default::default()) {
-            Ok(datalink::Channel::Ethernet(tx, rx)) => (tx, rx),
-            _ => return Err(anyhow::anyhow!("Failed to create datalink channel")),
-        };
+        Ok(ScannedPorts {
+            ports,
+            os_guess,
+            os_fingerprint,
+            mac: route.as_ref().filter(|r| r.link.on_link).map(|r| r.dst_mac),
+            trace,
+        })
+    }
 
-        let (result_tx, mut result_rx) = mpsc::channel(1000);
-        let timeout_duration = self.config.timeout;
+    fn link_to(&self, target: IpAddr) -> Option<Link> {
+        if target.is_loopback() || is_link_local(target) {
+            return None;
+        }
+        let src_ip = route::source_ip_for(target)?;
+        if src_ip == target {
+            return None;
+        }
 
-        tokio::task::spawn_blocking(move || {
-            receive_responses_datalink(rx, result_tx, timeout_duration, src_ip);
+        let interfaces = self.interfaces.get_or_init(datalink::interfaces);
+        let interface = interfaces.iter().find(|iface| iface.ips.iter().any(|nw| nw.ip() == src_ip))?;
+        Some(Link {
+            interface: interface.clone(),
+            src_ip,
+            src_mac: interface.mac?,
+            on_link: interface.ips.iter().any(|nw| nw.contains(target)),
+        })
+    }
+
+    /// The MAC to address frames for `target` to: the host itself on-link, otherwise the gateway.
+    async fn next_hop(&self, link: &Link, target: IpAddr) -> Option<MacAddr> {
+        if let Some(&mac) = self.known_macs.lock().unwrap().get(&target) {
+            return Some(mac);
+        }
+
+        if link.on_link {
+            let mac = route::learn_next_hop(link.interface.clone(), link.src_ip, target).await?;
+            self.known_macs.lock().unwrap().insert(target, mac);
+            return Some(mac);
+        }
+
+        // Every off-link target behind an interface shares a gateway, so ask once.
+        let mut gateways = self.gateways.lock().await;
+        let key = (link.interface.name.clone(), target.is_ipv4());
+        if let Some(&known) = gateways.get(&key) {
+            return known;
+        }
+        let gateway = route::learn_next_hop(link.interface.clone(), link.src_ip, target).await;
+        gateways.insert(key, gateway);
+        gateway
+    }
+
+    async fn raw_route(&self, target: IpAddr) -> Option<RawRoute> {
+        let link = self.link_to(target)?;
+        let slot = self.raw_slots.clone().acquire_owned().await.ok()?;
+        let dst_mac = self.next_hop(&link, target).await?;
+        Some(RawRoute { link, target, dst_mac, _slot: slot })
+    }
+
+    async fn tcp_connect_sweep(&self, target: IpAddr) -> Vec<PortResult> {
+        let answers = connect::sweep(
+            target,
+            &self.config.ports,
+            self.config.timeout,
+            self.config.max_retries,
+            &self.limits,
+            Transport::Tcp,
+        )
+        .await;
+
+        let mut results: Vec<PortResult> = answers
+            .into_iter()
+            .map(|(port, answer)| match answer {
+                Answer::Open(ms) => port_result(port, PortState::Open, Some(ms), Protocol::TCP),
+                Answer::Closed => port_result(port, PortState::Closed, None, Protocol::TCP),
+                Answer::Silent => port_result(port, PortState::Filtered, None, Protocol::TCP),
+            })
+            .collect();
+        results.sort_by_key(|r| r.port);
+        results
+    }
+
+    async fn udp_sweep(&self, target: IpAddr) -> Vec<PortResult> {
+        let answers = connect::sweep(
+            target,
+            &self.config.udp_ports,
+            self.config.timeout,
+            self.config.max_retries,
+            &self.limits,
+            Transport::Udp,
+        )
+        .await;
+
+        let mut results: Vec<PortResult> = answers
+            .into_iter()
+            .map(|(port, answer)| match answer {
+                Answer::Open(ms) => port_result(port, PortState::Open, Some(ms), Protocol::UDP),
+                Answer::Closed => port_result(port, PortState::Closed, None, Protocol::UDP),
+                Answer::Silent => port_result(port, PortState::OpenFiltered, None, Protocol::UDP),
+            })
+            .collect();
+        results.sort_by_key(|r| r.port);
+        results
+    }
+
+    async fn raw_sweep(&self, route: &RawRoute) -> Result<(Vec<PortResult>, Vec<TcpFingerprint>)> {
+        let scan_type = self.config.scan_type;
+        let (tx, rx) = open_capture(&route.link.interface)?;
+        let mut senders = vec![tx];
+        for _ in 1..(self.config.ports.len() / PORTS_PER_SENDER).clamp(1, MAX_SENDERS) {
+            senders.push(open_capture(&route.link.interface)?.0);
+        }
+        let src_port = random_source_port();
+
+        // Unbounded: sending and draining alternate, and the capture thread must never stall.
+        let (reply_tx, mut reply_rx) = mpsc::unbounded_channel();
+        let in_flight = Arc::new(AtomicIsize::new(0));
+        let replies_seen = in_flight.clone();
+        let (local, target) = (route.link.src_ip, route.target);
+        // A plain thread: a capture read may outlive the scan and must not hold up process exit.
+        std::thread::spawn(move || {
+            receive_replies(rx, reply_tx, local, target, src_port, &replies_seen)
         });
 
-        let results_map: Arc<Mutex<HashMap<u16, PortResult>>> = Arc::new(Mutex::new(HashMap::new()));
+        let silent = silent_port_state(scan_type);
+        let mut results: HashMap<u16, PortResult> = self
+            .config
+            .ports
+            .iter()
+            .map(|&port| (port, port_result(port, silent, None, Protocol::TCP)))
+            .collect();
+        let mut unanswered: HashSet<u16> = results.keys().copied().collect();
         let mut fingerprints = Vec::new();
 
-        for &port in &self.config.ports {
-            let src_port = random_source_port();
-            let packet = build_ether_syn_packet(src_mac, dst_mac, src_ip, target_v4, src_port, port);
+        for attempt in 0..=self.config.max_retries {
+            let before = unanswered.len();
+            senders = self.send_wave(route, senders, &unanswered, src_port, &in_flight).await?;
 
-            if let Some(res) = tx.send_to(&packet, None) {
-                let _ = res;
-            }
+            let deadline = tokio::time::Instant::now() + self.config.timeout;
+            let quiet_wait = (self.config.timeout / 4).max(MIN_QUIET_WAIT);
+            let mut wait_until = deadline;
+            while !unanswered.is_empty() {
+                let Ok(Some((reply, latency))) =
+                    tokio::time::timeout_at(wait_until, reply_rx.recv()).await
+                else {
+                    break;
+                };
+                wait_until = deadline.min(tokio::time::Instant::now() + quiet_wait);
 
-            {
-                let mut map = results_map.lock().await;
-                map.insert(
-                    port,
-                    PortResult {
-                        port,
-                        state: PortState::Filtered,
-                        latency_ms: None,
-                        service: None,
-                        llm_analysis: None,
-                        protocol: Some(crate::types::Protocol::TCP),
-                    },
-                );
-            }
-
-            if let Some(rate) = self.config.rate_limit {
-                let delay = Duration::from_micros(1_000_000 / rate as u64);
-                tokio::time::sleep(delay).await;
-            }
-        }
-
-        let response_deadline = Instant::now() + self.config.timeout + Duration::from_millis(500);
-
-        while Instant::now() < response_deadline {
-            match tokio::time::timeout(Duration::from_millis(100), result_rx.recv()).await {
-                Ok(Some((port, response_type, latency, fingerprint))) => {
-                    let state = match response_type {
-                        TcpResponseType::SynAck => PortState::Open,
-                        TcpResponseType::Rst => PortState::Closed,
-                        TcpResponseType::Other => PortState::Filtered,
-                    };
-
-                    if state == PortState::Open {
-                        fingerprints.push(fingerprint);
-                    }
-
-                    let mut map = results_map.lock().await;
-                    if let Some(result) = map.get_mut(&port) {
-                        result.state = state;
-                        result.latency_ms = if state == PortState::Open {
-                            Some(latency)
-                        } else {
-                            None
-                        };
-                    }
-                }
-                Ok(None) => break,
-                Err(_) => continue,
-            }
-        }
-
-        let map = results_map.lock().await;
-        let mut port_results: Vec<_> = map.values().cloned().collect();
-        drop(map);
-
-        port_results.sort_by_key(|r| r.port);
-
-        if self.config.service_detection {
-            info!("Starting service detection for {} open ports",
-                  port_results.iter().filter(|p| p.state == PortState::Open).count());
-
-            for port_result in &mut port_results {
-                if port_result.state == PortState::Open {
-                    match service::grab_banner_with_db(
-                        target,
-                        port_result.port,
-                        self.config.timeout,
-                        self.service_matcher.as_ref()
-                    ).await {
-                        Ok(service_info) => {
-                            debug!("Detected service on {}:{}: {}", target, port_result.port, service_info.service_name);
-                            port_result.service = Some(service_info);
+                let (port, state) = match reply {
+                    Reply::Tcp { port, kind, fingerprint } => {
+                        let state = interpret_response(kind, fingerprint.window_size, scan_type);
+                        if state == PortState::Open && unanswered.contains(&port) {
+                            fingerprints.push(fingerprint);
                         }
-                        Err(e) => {
-                            debug!("Failed to detect service on {}:{}: {}", target, port_result.port, e);
-                        }
+                        (port, state)
                     }
-                }
-            }
-        }
-
-        if self.config.llm_enabled {
-            info!("Starting LLM analysis for open ports");
-            let llm = if let Some(ref provider_name) = self.llm_provider_name {
-                LLMAnalyzer::from_provider_name(provider_name)
-            } else {
-                LLMAnalyzer::from_env()
-            };
-
-            if llm.is_enabled() {
-                info!("Using {} LLM provider", llm.provider_name());
-                for port_result in &mut port_results {
-                    if port_result.state == PortState::Open {
-                        if let Some(ref service_info) = port_result.service {
-                            match llm.analyze_banner(&service_info.banner, port_result.port).await {
-                                Ok(Some(analysis)) => {
-                                    info!("LLM analyzed {}:{} - Confidence: {:.2}",
-                                          target, port_result.port, analysis.confidence);
-                                    port_result.llm_analysis = Some(analysis);
-                                }
-                                Ok(None) => {
-                                    debug!("LLM disabled for {}:{}", target, port_result.port);
-                                }
-                                Err(e) => {
-                                    warn!("LLM analysis failed for {}:{}: {}", target, port_result.port, e);
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                warn!("LLM enabled but no API key found. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or OLLAMA_HOST");
-            }
-        }
-
-        let duration = start_time.elapsed();
-
-        let mut os_guess = None;
-        let mut os_fingerprint_str = None;
-
-        if self.config.os_detection {
-            let open_ports: Vec<u16> = port_results.iter()
-                .filter(|r| r.state == PortState::Open)
-                .map(|r| r.port)
-                .collect();
-
-            let active_fp = if let Some(open_port) = find_open_port(&open_ports) {
-                let closed_port = find_closed_port(&open_ports);
-                info!("Sending OS fingerprint probes to {}:{} (open) / {} (closed)", target, open_port, closed_port);
-
-                let interface2 = Self::find_interface_by_ip(src_ip)
-                    .ok_or_else(|| anyhow::anyhow!("Interface not found for OS probes"))?;
-
-                let probe_result = tokio::task::spawn_blocking(move || {
-                    let (mut tx2, mut rx2) = match datalink::channel(&interface2, Default::default()) {
-                        Ok(datalink::Channel::Ethernet(t, r)) => (t, r),
-                        _ => return None,
-                    };
-                    Some(send_os_probes(
-                        &mut tx2, &mut rx2,
-                        src_mac, dst_mac,
-                        src_ip, target_v4,
-                        open_port, closed_port,
-                    ))
-                }).await.ok().flatten();
-
-                probe_result.and_then(|r| build_observed_fingerprint(&r))
-            } else if !fingerprints.is_empty() {
-                let window_sizes: Vec<u16> = fingerprints.iter().map(|f| f.window_size).collect();
-                let ttl = fingerprints[0].ttl;
-                Some(ObservedFingerprint::from_responses(ttl, window_sizes, &[]))
-            } else {
-                None
-            };
-
-            if let Some(observed) = active_fp {
-                os_fingerprint_str = Some(format!("TTL={} WIN={} SP={} GCD={} ISR={}",
-                    observed.ttl,
-                    observed.window_sizes.iter().map(|w| format!("{:X}", w)).collect::<Vec<_>>().join(","),
-                    observed.sp, observed.gcd, observed.isr));
-
-                if let Some(db) = &self.os_db {
-                    let matches = db.match_fingerprint(&observed);
-                    if let Some(best) = matches.first() {
-                        os_guess = Some(format!("{} (score: {:.0}%)", best.name, best.score * 100.0));
-                        debug!("OS detection: {} candidates, best: {} ({:.0}%)", matches.len(), best.name, best.score * 100.0);
-                    }
-                }
-            } else if !fingerprints.is_empty() {
-                os_fingerprint_str = Some(format!("TTL={} WIN={}", fingerprints[0].ttl, fingerprints[0].window_size));
-                if let Some(db) = &self.os_db {
-                    if let Some(matched) = db.match_os(fingerprints[0].ttl, fingerprints[0].window_size) {
-                        os_guess = Some(matched.name.clone());
-                    }
-                }
-            }
-        } else if !fingerprints.is_empty() {
-            os_fingerprint_str = Some(format!("TTL={} WIN={}", fingerprints[0].ttl, fingerprints[0].window_size));
-            if let Some(db) = &self.os_db {
-                if let Some(matched) = db.match_os(fingerprints[0].ttl, fingerprints[0].window_size) {
-                    os_guess = Some(matched.name.clone());
-                }
-            }
-        }
-
-        Ok(HostResult {
-            ip: target,
-            hostname: None,
-            ports: port_results,
-            scan_duration_ms: duration.as_millis() as u64,
-            os_guess,
-            os_fingerprint: os_fingerprint_str,
-        })
-    }
-
-    async fn scan_host_connect(&self, target: IpAddr, _target_v4: Ipv4Addr) -> Result<HostResult> {
-        let start_time = Instant::now();
-        let results_map: Arc<Mutex<HashMap<u16, PortResult>>> = Arc::new(Mutex::new(HashMap::new()));
-
-        let mut futures = Vec::new();
-        for &port in &self.config.ports {
-            let timeout = self.config.timeout;
-            let results_map_clone = results_map.clone();
-
-            futures.push(tokio::spawn(async move {
-                let addr = std::net::SocketAddr::new(target, port);
-                let state = match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
-                    Ok(Ok(_)) => PortState::Open,
-                    Ok(Err(_)) => PortState::Closed,
-                    Err(_) => PortState::Filtered,
+                    Reply::Unreachable { port } => (port, PortState::Filtered),
                 };
 
-                let mut map = results_map_clone.lock().await;
-                map.insert(port, PortResult {
-                    port,
-                    state,
-                    latency_ms: None,
-                    service: None,
-                    llm_analysis: None,
-                    protocol: Some(crate::types::Protocol::TCP),
-                });
-            }));
-        }
-
-        for f in futures {
-            let _ = f.await;
-        }
-
-        let map = results_map.lock().await;
-        let mut port_results: Vec<_> = map.values().cloned().collect();
-        drop(map);
-        port_results.sort_by_key(|r| r.port);
-
-        if self.config.service_detection {
-            for port_result in &mut port_results {
-                if port_result.state == PortState::Open {
-                    match service::grab_banner_with_db(
-                        target,
-                        port_result.port,
-                        self.config.timeout,
-                        self.service_matcher.as_ref()
-                    ).await {
-                        Ok(service_info) => {
-                            port_result.service = Some(service_info);
-                        }
-                        Err(e) => {
-                            debug!("Failed to detect service on {}:{}: {}", target, port_result.port, e);
-                        }
-                    }
+                if !unanswered.remove(&port) {
+                    continue;
                 }
+                if let Some(result) = results.get_mut(&port) {
+                    result.state = state;
+                    result.latency_ms = (state == PortState::Open).then_some(latency);
+                }
+            }
+
+            let recovered = before - unanswered.len();
+            if attempt > 0 && recovered > 0 {
+                // A retry got answers the first try did not, so packets are being lost.
+                self.limits.note_loss();
+            }
+            // Same rule as the connect sweep: retry only while retries still turn up answers.
+            if unanswered.is_empty() || (attempt > 0 && recovered == 0) {
+                break;
             }
         }
 
-        Ok(HostResult {
-            ip: target,
-            hostname: None,
-            ports: port_results,
-            scan_duration_ms: start_time.elapsed().as_millis() as u64,
-            os_guess: None,
-            os_fingerprint: None,
-        })
+        let mut port_results: Vec<PortResult> = results.into_values().collect();
+        port_results.sort_by_key(|r| r.port);
+        Ok((port_results, fingerprints))
     }
-}
 
-fn receive_responses_datalink(
-    mut rx: Box<dyn DataLinkReceiver>,
-    result_tx: mpsc::Sender<(u16, TcpResponseType, u64, TcpFingerprint)>,
-    timeout: Duration,
-    local_ip: Ipv4Addr,
-) {
-    let start_time = Instant::now();
-    let deadline = start_time + timeout + Duration::from_secs(2);
+    /// Sends one probe per port on blocking threads, since a packet send can stall an async worker.
+    async fn send_wave(
+        &self,
+        route: &RawRoute,
+        mut senders: Vec<Box<dyn DataLinkSender>>,
+        ports: &HashSet<u16>,
+        src_port: u16,
+        in_flight: &Arc<AtomicIsize>,
+    ) -> Result<Vec<Box<dyn DataLinkSender>>> {
+        let wave: Vec<u16> = ports.iter().copied().collect();
+        let (src_mac, dst_mac) = (route.link.src_mac, route.dst_mac);
+        let (src_ip, target) = (route.link.src_ip, route.target);
+        let scan_type = self.config.scan_type;
+        let pacer = self.limits.pacer.clone();
+        let window = (PROBE_WINDOW >> self.limits.backoff()).max(MIN_PROBE_WINDOW);
+        let in_flight = in_flight.clone();
+        in_flight.store(0, Ordering::Relaxed);
 
-    loop {
-        if Instant::now() > deadline {
-            break;
-        }
-
-        match rx.next() {
-            Ok(packet) => {
-                let eth = EthernetPacket::new(packet).unwrap();
-                if eth.get_ethertype() == EtherTypes::Ipv4 {
-                    let ipv4 = Ipv4Packet::new(eth.payload()).unwrap();
-
-                    if ipv4.get_destination() != local_ip {
-                        continue;
-                    }
-
-                    if ipv4.get_next_level_protocol() == IpNextHeaderProtocols::Tcp {
-                        if let Some((port, response_type, fingerprint)) = parse_tcp_response(eth.payload()) {
-                            let latency = Instant::now().duration_since(start_time).as_millis() as u64;
-                            if result_tx.blocking_send((port, response_type, latency, fingerprint)).is_err() {
-                                break;
+        let senders = tokio::task::spawn_blocking(move || {
+            let share = wave.len().div_ceil(senders.len()).max(1);
+            std::thread::scope(|scope| {
+                for (tx, ports) in senders.iter_mut().zip(wave.chunks(share)) {
+                    let (pacer, in_flight) = (&pacer, &in_flight);
+                    scope.spawn(move || {
+                        for &port in ports {
+                            pacer.wait_blocking();
+                            wait_for_window(in_flight, window);
+                            in_flight.fetch_add(1, Ordering::Relaxed);
+                            let frame = build_probe_frame(
+                                src_mac, dst_mac, src_ip, target, src_port, port, scan_type, NORMAL_TTL,
+                            );
+                            if let Some(Some(Err(e))) = frame.map(|f| tx.send_to(&f, None)) {
+                                debug!("Failed to send probe to {}:{}: {}", target, port, e);
                             }
                         }
-                    }
+                    });
                 }
-            }
-            Err(_) => {
-                std::thread::sleep(Duration::from_millis(5));
+            });
+            senders
+        })
+        .await?;
+        Ok(senders)
+    }
+
+    async fn detect_services(&self, target: IpAddr, ports: &mut [PortResult]) {
+        if !self.config.service_detection {
+            return;
+        }
+
+        let wanted: Vec<(u16, bool)> = ports
+            .iter()
+            .filter_map(|p| {
+                let udp = p.protocol == Some(Protocol::UDP);
+                let candidate = p.state == PortState::Open || (udp && p.state == PortState::OpenFiltered);
+                candidate.then_some((p.port, udp))
+            })
+            .collect();
+        info!("Starting service detection for {} ports", wanted.len());
+
+        let wait = self.config.timeout;
+        let matcher = self.service_matcher.as_ref();
+        let intensity = self.config.version_intensity;
+        let sockets = &self.limits.sockets;
+
+        let mut found: HashMap<(u16, bool), service::ServiceInfo> = stream::iter(wanted)
+            .map(|(port, udp)| async move {
+                let detected = if udp {
+                    service::detect_udp(target, port, wait, matcher, intensity, sockets).await
+                } else {
+                    service::grab_banner_with_db(target, port, wait, matcher, intensity, sockets).await.ok()
+                };
+                ((port, udp), detected)
+            })
+            .buffer_unordered(PORT_PARALLELISM)
+            .filter_map(|(key, detected)| async move { detected.map(|info| (key, info)) })
+            .collect()
+            .await;
+
+        for result in ports {
+            let udp = result.protocol == Some(Protocol::UDP);
+            if let Some(info) = found.remove(&(result.port, udp)) {
+                // An answer to a version probe proves a silent UDP port is really open.
+                if udp && !info.banner.is_empty() {
+                    result.state = PortState::Open;
+                }
+                result.service = Some(info);
             }
         }
+    }
+
+    /// Saves every probe's raw reply as evidence for building signatures.
+    async fn record_responses(&self, target: IpAddr, ports: &[PortResult]) -> Result<()> {
+        let (Some(dir), Some(matcher)) = (&self.config.record_dir, &self.service_matcher) else {
+            return Ok(());
+        };
+        std::fs::create_dir_all(dir)?;
+
+        let mut lines = String::new();
+        for result in ports.iter().filter(|p| p.state == PortState::Open || p.state == PortState::OpenFiltered) {
+            let udp = result.protocol == Some(Protocol::UDP);
+            let recordings = service::record_port(
+                target, result.port, udp, self.config.timeout, matcher, &self.limits.sockets,
+            )
+            .await;
+            for recording in recordings {
+                lines.push_str(&serde_json::to_string(&recording)?);
+                lines.push('\n');
+            }
+        }
+
+        let file = format!("{}/{}.jsonl", dir, target.to_string().replace(':', "_"));
+        std::fs::write(file, lines)?;
+        Ok(())
+    }
+
+    async fn analyze_with_llm(&self, target: IpAddr, port_results: &mut [PortResult]) {
+        if !self.config.llm_enabled {
+            return;
+        }
+
+        info!("Starting LLM analysis for open ports");
+        let llm = if let Some(ref provider_name) = self.llm_provider_name {
+            LLMAnalyzer::from_provider_name(provider_name)
+        } else {
+            LLMAnalyzer::from_env()
+        };
+
+        if !llm.is_enabled() {
+            warn!("LLM enabled but no API key found. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or OLLAMA_HOST");
+            return;
+        }
+
+        info!("Using {} LLM provider", llm.provider_name());
+        for port_result in port_results.iter_mut().filter(|p| p.state == PortState::Open) {
+            let Some(ref service_info) = port_result.service else { continue };
+            match llm.analyze_banner(&service_info.banner, port_result.port).await {
+                Ok(Some(analysis)) => {
+                    info!("LLM analyzed {}:{} - Confidence: {:.2}",
+                          target, port_result.port, analysis.confidence);
+                    port_result.llm_analysis = Some(analysis);
+                }
+                Ok(None) => {
+                    debug!("LLM disabled for {}:{}", target, port_result.port);
+                }
+                Err(e) => {
+                    warn!("LLM analysis failed for {}:{}: {}", target, port_result.port, e);
+                }
+            }
+        }
+    }
+
+    async fn trace_route(
+        &self,
+        target: IpAddr,
+        route: Option<&RawRoute>,
+        ports: &[PortResult],
+    ) -> Option<Vec<Hop>> {
+        let Some(route) = route else {
+            warn!("Traceroute needs a raw route, skipping {}", target);
+            return None;
+        };
+
+        let open = ports
+            .iter()
+            .find(|p| p.state == PortState::Open && p.protocol == Some(Protocol::TCP))
+            .map_or(TRACE_DEFAULT_PORT, |p| p.port);
+        let request = TraceRoute {
+            interface: route.link.interface.clone(),
+            src_mac: route.link.src_mac,
+            dst_mac: route.dst_mac,
+            src_ip: route.link.src_ip,
+            target,
+            port: open,
+        };
+        tokio::task::spawn_blocking(move || trace::trace(&request, TRACE_WAIT)).await.ok()
+    }
+
+    async fn fingerprint_os(
+        &self,
+        target: IpAddr,
+        route: Option<&RawRoute>,
+        port_results: &[PortResult],
+        fingerprints: &[TcpFingerprint],
+    ) -> Result<(Option<String>, Option<String>)> {
+        let passive_summary = || {
+            fingerprints.first().map(|f| format!("TTL={} WIN={}", f.ttl, f.window_size))
+        };
+
+        if !self.config.os_detection {
+            return Ok((None, passive_summary()));
+        }
+        let (Some(route), IpAddr::V4(dst_ip)) = (route, target) else {
+            warn!("OS detection needs a raw IPv4 route, skipping {}", target);
+            return Ok((None, None));
+        };
+        let IpAddr::V4(src_ip) = route.link.src_ip else {
+            return Ok((None, None));
+        };
+
+        let open_ports: Vec<u16> = port_results.iter()
+            .filter(|r| r.state == PortState::Open && r.protocol == Some(Protocol::TCP))
+            .map(|r| r.port)
+            .collect();
+
+        let observed = if let Some(open_port) = find_open_port(&open_ports) {
+            let closed_port = find_closed_port(&open_ports);
+            info!("Sending OS fingerprint probes to {}:{} (open) / {} (closed)", target, open_port, closed_port);
+
+            let interface = route.link.interface.clone();
+            let (src_mac, dst_mac) = (route.link.src_mac, route.dst_mac);
+            let probe_result = tokio::task::spawn_blocking(move || {
+                let (mut tx, mut rx) = open_capture(&interface).ok()?;
+                Some(send_os_probes(
+                    &mut tx, &mut rx,
+                    src_mac, dst_mac,
+                    src_ip, dst_ip,
+                    open_port, closed_port,
+                ))
+            }).await.ok().flatten();
+
+            probe_result.and_then(|r| build_observed_fingerprint(&r))
+        } else if !fingerprints.is_empty() {
+            let window_sizes: Vec<u16> = fingerprints.iter().map(|f| f.window_size).collect();
+            Some(ObservedFingerprint::from_responses(fingerprints[0].ttl, window_sizes, &[]))
+        } else {
+            None
+        };
+
+        if let Some(observed) = observed {
+            let summary = format!("TTL={} WIN={} SP={} GCD={} ISR={}",
+                observed.ttl,
+                observed.window_sizes.iter().map(|w| format!("{:X}", w)).collect::<Vec<_>>().join(","),
+                observed.sp, observed.gcd, observed.isr);
+
+            let guess = self.os_db.as_ref().and_then(|db| {
+                let matches = db.match_fingerprint(&observed);
+                matches.first().map(|best| {
+                    debug!("OS detection: {} candidates, best: {} ({:.0}%)", matches.len(), best.name, best.score * 100.0);
+                    format!("{} (score: {:.0}%)", best.name, best.score * 100.0)
+                })
+            });
+            return Ok((guess, Some(summary)));
+        }
+
+        let guess = fingerprints.first().and_then(|f| {
+            self.os_db.as_ref()?.match_os(f.ttl, f.window_size).map(|m| m.name.clone())
+        });
+        Ok((guess, passive_summary()))
     }
 }
 
-fn get_source_ip(_target: Ipv4Addr) -> Result<Ipv4Addr> {
-    let interfaces = datalink::interfaces();
-    for interface in interfaces {
-        if interface.is_loopback() { continue; }
-        for ip_network in &interface.ips {
-            if let IpAddr::V4(ipv4) = ip_network.ip() {
-                if ipv4.is_unspecified() || ipv4.is_loopback() { continue; }
-                return Ok(ipv4);
+/// Holds a sender back while the window is full. Silent ports never free their slots, so after
+/// WINDOW_STALL the outstanding probes are written off rather than stalling the sweep.
+fn wait_for_window(in_flight: &AtomicIsize, window: isize) {
+    let start = Instant::now();
+    while in_flight.load(Ordering::Relaxed) >= window {
+        if start.elapsed() >= WINDOW_STALL {
+            in_flight.store(0, Ordering::Relaxed);
+            return;
+        }
+        std::thread::yield_now();
+    }
+}
+
+fn receive_replies(
+    mut rx: Box<dyn DataLinkReceiver>,
+    result_tx: mpsc::UnboundedSender<(Reply, u64)>,
+    local_ip: IpAddr,
+    target: IpAddr,
+    src_port: u16,
+    in_flight: &AtomicIsize,
+) {
+    let start_time = Instant::now();
+
+    while !result_tx.is_closed() {
+        let Ok(frame) = rx.next() else {
+            std::thread::sleep(Duration::from_millis(1));
+            continue;
+        };
+        if let Some(reply) = parse_reply(frame, local_ip, target, src_port) {
+            in_flight.fetch_sub(1, Ordering::Relaxed);
+            let latency = start_time.elapsed().as_millis() as u64;
+            if result_tx.send((reply, latency)).is_err() {
+                break;
             }
         }
     }
-    Err(anyhow::anyhow!("No network interface found"))
 }
 
 fn get_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    format_utc(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs())
+}
 
-    let mut days = (secs / 86400) as i64;
-    let time_of_day = secs % 86400;
-    let hours = time_of_day / 3600;
-    let minutes = (time_of_day % 3600) / 60;
-    let seconds = time_of_day % 60;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let mut year = 1970i64;
-    loop {
-        let days_in_year = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 366 } else { 365 };
-        if days < days_in_year { break; }
-        days -= days_in_year;
-        year += 1;
+    #[test]
+    fn open_window_does_not_block() {
+        let in_flight = AtomicIsize::new(PROBE_WINDOW - 1);
+        let start = Instant::now();
+        wait_for_window(&in_flight, PROBE_WINDOW);
+        assert!(start.elapsed() < WINDOW_STALL);
+        assert_eq!(in_flight.load(Ordering::Relaxed), PROBE_WINDOW - 1);
     }
-    let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let month_days = [31, if is_leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let mut month = 0;
-    for (i, &md) in month_days.iter().enumerate() {
-        if days < md as i64 { month = i + 1; break; }
-        days -= md as i64;
-    }
-    let day = days + 1;
 
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", year, month, day, hours, minutes, seconds)
+    #[test]
+    fn full_window_with_silent_ports_is_written_off() {
+        let in_flight = AtomicIsize::new(PROBE_WINDOW);
+        wait_for_window(&in_flight, PROBE_WINDOW);
+        assert_eq!(in_flight.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn replies_release_a_full_window() {
+        let in_flight = Arc::new(AtomicIsize::new(PROBE_WINDOW));
+        let reader = in_flight.clone();
+        let thread = std::thread::spawn(move || reader.fetch_sub(1, Ordering::Relaxed));
+        wait_for_window(&in_flight, PROBE_WINDOW);
+        thread.join().unwrap();
+        assert!(in_flight.load(Ordering::Relaxed) < PROBE_WINDOW);
+    }
+
+    #[test]
+    fn link_local_is_recognised() {
+        assert!(is_link_local("fe80::1".parse().unwrap()));
+        assert!(!is_link_local("fd00::1".parse().unwrap()));
+        assert!(!is_link_local("10.0.0.1".parse().unwrap()));
+    }
 }

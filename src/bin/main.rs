@@ -1,12 +1,12 @@
 use anyhow::Result;
 use clap::Parser;
 use std::time::Duration;
-use tokmap::{output, parse_targets, ports, Scanner, ScanConfig, ScanType, TimingTemplate, LLMAnalyzer};
+use tokmap::{connect, output, parse_targets, ports, Scanner, ScanConfig, ScanType, TimingTemplate, LLMAnalyzer};
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Tokmap - AI-powered network scanner", long_about = None)]
+#[command(author, version, about = "Tokmap - AI-powered network scanner", long_about = None, disable_version_flag = true)]
 struct Args {
     #[arg(short, long, value_delimiter = ',')]
     targets: Vec<String>,
@@ -65,6 +65,26 @@ struct Args {
     #[arg(short = 's', long = "service-detect")]
     service_detection: bool,
 
+    /// Same as -s, so `-sV` works
+    #[arg(short = 'V', hide = true)]
+    version_detect: bool,
+
+    /// Print version
+    #[arg(long, action = clap::ArgAction::Version)]
+    version: Option<bool>,
+
+    /// Extra signature file, added to the built-in ones. Repeatable.
+    #[arg(long = "signatures", value_name = "FILE")]
+    signatures: Vec<String>,
+
+    /// Save every probe's raw reply to DIR, as evidence for building signatures
+    #[arg(long = "record", value_name = "DIR")]
+    record: Option<String>,
+
+    /// Trace the network path to each host
+    #[arg(long)]
+    traceroute: bool,
+
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=9))]
     version_intensity: Option<u8>,
 
@@ -89,8 +109,17 @@ struct Args {
     #[arg(short = 'R', long)]
     dns_servers: bool,
 
+    /// Write JSON results to FILE
     #[arg(short, long)]
     output: Option<String>,
+
+    /// Write XML results to FILE
+    #[arg(long, value_name = "FILE")]
+    xml: Option<String>,
+
+    /// Write one line per host to FILE
+    #[arg(long, value_name = "FILE")]
+    grepable: Option<String>,
 
     #[arg(short, long)]
     verbose: bool,
@@ -121,15 +150,32 @@ impl Args {
         }
     }
 
+    /// A UDP scan on its own scans no TCP, unless a TCP scan type is also asked for.
+    fn tcp_requested(&self) -> bool {
+        let tcp_type = self.syn_scan || self.connect_scan || self.ack_scan || self.window_scan
+            || self.fin_scan || self.null_scan || self.xmas_scan;
+        !self.udp_scan || tcp_type
+    }
+
     fn get_timing_template(&self) -> TimingTemplate {
         TimingTemplate::from_level(self.timing.unwrap_or(3))
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let args = Args::parse();
 
+    let max_sockets = args.concurrency.unwrap_or(args.get_timing_template().to_config().max_concurrent);
+    // Must run before the runtime starts any threads.
+    connect::prepare_socket_table(max_sockets);
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(args))
+}
+
+async fn run(args: Args) -> Result<()> {
     let log_level = if args.verbose {
         Level::DEBUG
     } else {
@@ -139,6 +185,7 @@ async fn main() -> Result<()> {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(log_level)
         .with_target(false)
+        .with_writer(std::io::stderr)
         .finish();
 
     tracing::subscriber::set_global_default(subscriber)?;
@@ -160,20 +207,25 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let ports = if let Some(ref port_specs) = args.ports {
-        ports::parse_port_spec(port_specs)?
-    } else if args.fast {
-        ports::get_ports(Some(100), true)
-    } else if let Some(n) = args.top_ports {
-        ports::get_ports(Some(n), false)
+    let (ports, udp_ports) = if let Some(ref port_specs) = args.ports {
+        ports::split_port_spec(port_specs)?
     } else {
-        vec![
-            21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995, 1723, 3306, 3389,
-            5900, 8080,
-        ]
+        let tcp = if args.fast {
+            ports::get_ports(Some(100), true)
+        } else if let Some(n) = args.top_ports {
+            ports::get_ports(Some(n), false)
+        } else {
+            vec![
+                21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995, 1723, 3306, 3389,
+                5900, 8080,
+            ]
+        };
+        (tcp, ports::TOP_UDP_PORTS.to_vec())
     };
 
-    if ports.is_empty() {
+    let tcp_scan = args.tcp_requested();
+    let nothing_to_scan = (!tcp_scan || ports.is_empty()) && (!args.udp_scan || udp_ports.is_empty());
+    if nothing_to_scan && !args.ping_scan {
         eprintln!("Error: At least one port must be specified");
         std::process::exit(1);
     }
@@ -189,7 +241,7 @@ async fn main() -> Result<()> {
     info!("Targets: {} hosts", target_ips.len());
     info!("Ports: {} ports per host", ports.len());
 
-    let service_detection = args.service_detection || args.aggressive;
+    let service_detection = args.service_detection || args.version_detect || args.aggressive;
     let os_detection = args.os_detection || args.aggressive;
 
     if args.llm_enabled {
@@ -200,18 +252,24 @@ async fn main() -> Result<()> {
     let config = ScanConfig {
         targets: target_ips.clone(),
         ports,
+        udp_ports,
         timeout: Duration::from_millis(args.timeout.unwrap_or(timing_config.timeout.as_millis() as u64)),
         max_concurrent: args.concurrency.unwrap_or(timing_config.max_concurrent),
+        max_retries: timing_config.max_retries,
         rate_limit: args.rate_limit.or(timing_config.rate_limit),
         service_detection,
         llm_enabled: args.llm_enabled,
         scan_type: args.get_scan_type(),
+        tcp_scan,
         udp_scan: args.udp_scan,
+        traceroute: args.traceroute,
         host_discovery: !args.skip_discovery,
         ping_scan_only: args.ping_scan,
         version_intensity: args.version_intensity.unwrap_or(7),
         os_detection,
         resolve_dns: !args.no_dns,
+        signature_files: args.signatures.clone(),
+        record_dir: args.record.clone(),
     };
 
     let scanner = Scanner::with_llm_provider(config, args.llm_provider.clone());
@@ -226,6 +284,12 @@ async fn main() -> Result<()> {
     if let Some(output_path) = &args.output {
         info!("Writing results to: {}", output_path);
         output::OutputFormatter::write_json_file(&results, output_path)?;
+    }
+    if let Some(path) = &args.xml {
+        output::OutputFormatter::write_xml(&results, Some(path))?;
+    }
+    if let Some(path) = &args.grepable {
+        output::OutputFormatter::write_grepable(&results, Some(path))?;
     }
 
     if args.json_only {

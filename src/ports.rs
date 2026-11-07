@@ -144,8 +144,9 @@ pub fn parse_port_spec(specs: &[String]) -> anyhow::Result<Vec<u16>> {
             if port_str.contains('-') {
                 let range: Vec<&str> = port_str.split('-').collect();
                 if range.len() == 2 {
-                    let start: u16 = range[0].parse()?;
-                    let end: u16 = range[1].parse()?;
+                    // nmap forms: "-" is every port, "-100" and "1000-" leave one end open.
+                    let start: u16 = if range[0].is_empty() { 1 } else { range[0].parse()? };
+                    let end: u16 = if range[1].is_empty() { 65535 } else { range[1].parse()? };
                     for port in start..=end {
                         ports.push(port);
                     }
@@ -159,4 +160,60 @@ pub fn parse_port_spec(specs: &[String]) -> anyhow::Result<Vec<u16>> {
     ports.sort();
     ports.dedup();
     Ok(ports)
+}
+
+/// Splits a port spec into TCP and UDP lists. `T:` and `U:` apply until the next prefix, and
+/// unprefixed ports apply to both.
+pub fn split_port_spec(specs: &[String]) -> anyhow::Result<(Vec<u16>, Vec<u16>)> {
+    let (mut tcp, mut udp) = (Vec::new(), Vec::new());
+    let (mut to_tcp, mut to_udp) = (true, true);
+
+    for part in specs.iter().flat_map(|spec| spec.split(',')).map(str::trim) {
+        if part.starts_with("T:") {
+            (to_tcp, to_udp) = (true, false);
+        } else if part.starts_with("U:") {
+            (to_tcp, to_udp) = (false, true);
+        }
+        let ports = parse_port_spec(&[part.to_string()])?;
+        if to_tcp {
+            tcp.extend(&ports);
+        }
+        if to_udp {
+            udp.extend(&ports);
+        }
+    }
+
+    for list in [&mut tcp, &mut udp] {
+        list.sort_unstable();
+        list.dedup();
+    }
+    Ok((tcp, udp))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(spec: &str) -> Vec<u16> {
+        parse_port_spec(&[spec.to_string()]).unwrap()
+    }
+
+    #[test]
+    fn open_ended_ranges() {
+        assert_eq!(parse("-").len(), 65535);
+        assert_eq!(parse("-3"), vec![1, 2, 3]);
+        assert_eq!(parse("65534-"), vec![65534, 65535]);
+    }
+
+    #[test]
+    fn prefixes_split_tcp_and_udp() {
+        let split = |spec: &str| split_port_spec(&[spec.to_string()]).unwrap();
+        assert_eq!(split("80,443"), (vec![80, 443], vec![80, 443]));
+        assert_eq!(split("U:53,111,T:21-22"), (vec![21, 22], vec![53, 111]));
+    }
+
+    #[test]
+    fn lists_and_ranges_merge() {
+        assert_eq!(parse("80,79-81,T:443"), vec![79, 80, 81, 443]);
+    }
 }

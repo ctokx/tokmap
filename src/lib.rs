@@ -1,3 +1,4 @@
+pub mod connect;
 pub mod discovery;
 pub mod os_probe;
 pub mod llm;
@@ -6,14 +7,17 @@ pub mod os_db;
 pub mod output;
 pub mod packet;
 pub mod ports;
+pub mod route;
 pub mod scanner;
 pub mod service;
 pub mod service_db;
 pub mod target;
 pub mod timing;
+pub mod trace;
 pub mod types;
 pub mod tls;
 pub mod udp;
+pub mod vendors;
 
 pub use types::{HostResult, PortResult, PortState, Protocol, ScanConfig, ScanResults, ScanType};
 pub use scanner::Scanner;
