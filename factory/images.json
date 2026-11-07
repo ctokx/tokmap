@@ -1,0 +1,18 @@
+[
+  {"image": "redis", "service": "redis", "product": "Redis", "tags": ["7.4.1", "7.2.6", "6.2.16"]},
+  {"image": "nginx", "service": "http", "product": "nginx", "tags": ["1.27.3", "1.26.2", "1.24.0"]},
+  {"image": "httpd", "service": "http", "product": "Apache httpd", "tags": ["2.4.62", "2.4.58"]},
+  {"image": "memcached", "service": "memcached", "product": "memcached", "tags": ["1.6.32", "1.6.22"]},
+  {"image": "mysql", "service": "mysql", "product": "MySQL", "tags": ["8.4.3", "8.0.40"],
+   "env": {"MYSQL_ROOT_PASSWORD": "tokmap"}, "settle": 30},
+  {"image": "mariadb", "service": "mysql", "product": "MariaDB", "tags": ["11.4.4", "10.11.10"],
+   "env": {"MARIADB_ROOT_PASSWORD": "tokmap"}, "settle": 20},
+  {"image": "postgres", "service": "postgresql", "product": "PostgreSQL", "tags": ["17.2", "16.6"],
+   "env": {"POSTGRES_PASSWORD": "tokmap"}, "settle": 10},
+  {"image": "mongo", "service": "mongodb", "product": "MongoDB", "tags": ["8.0.3", "7.0.15"], "settle": 10},
+  {"image": "rabbitmq", "service": "amqp", "product": "RabbitMQ", "tags": ["4.0.4", "3.13.7"], "settle": 20},
+  {"image": "tomcat", "service": "http", "product": "Apache Tomcat", "tags": ["10.1.33", "9.0.97"], "settle": 10},
+  {"image": "valkey/valkey", "service": "redis", "product": "Valkey", "tags": ["8.1.0", "8.0.2", "7.2.7"]},
+  {"image": "getmeili/meilisearch", "service": "http", "product": "Meilisearch", "tags": ["v1.12.0", "v1.11.3", "v1.10.3"],
+   "versions": {"v1.12.0": "1.12.0", "v1.11.3": "1.11.3", "v1.10.3": "1.10.3"}, "ports": ["7700/tcp"]}
+]

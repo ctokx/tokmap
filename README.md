@@ -1,6 +1,6 @@
 # tokmap
 
-An asynchronous network scanner written in Rust. Uses nmap's public signature databases for service detection, OS fingerprinting, and port frequency data. Optionally integrates with LLMs (Gemini) for banner analysis.
+An asynchronous network scanner written in Rust, with its own service signatures built from recordings of real software. Optionally integrates with LLMs (Claude, OpenAI, Gemini, Ollama) for banner analysis.
 
 **Status: work in progress.** See [Limitations](#limitations) below.
 
@@ -12,20 +12,28 @@ Requires Rust toolchain (tested on stable).
 cargo build --release
 ```
 
-The binary will be at `target/release/tokmap`.
+The binaries will be at `target/release/tokmap` and `target/release/tokmap-replay`.
 
-## Nmap data files
+On Windows, linking needs `Packet.lib` from the [Npcap SDK](https://npcap.com/#download): unpack it and add its `Lib/x64` folder to the `LIB` environment variable. Running needs Npcap installed.
 
-Tokmap reads the following nmap data files from the working directory at runtime:
+## Service signatures
 
-- `nmap-service-probes` -- service signature database (~9500 signatures)
-- `nmap-services` -- port frequency data (~27k entries)
-- `nmap-os-db` -- OS fingerprint database (~115k lines)
-- `nmap-mac-prefixes` -- MAC vendor prefixes (~49k entries)
-- `nmap-rpc` -- RPC service names (~1850 entries)
-- `nmap-protocols` -- IP protocol numbers (153 entries)
+Service probes and signatures live in [`signatures/`](signatures/) and are built into the binary:
 
-These files are from the [nmap project](https://github.com/nmap/nmap/) and are not included in this repository. Download them and place them in the working directory. Tokmap degrades gracefully if any are missing.
+- `tokmap.probes`: what tokmap sends. Each probe follows a public protocol specification, named beside it.
+- `verified.matches`: signatures, each tested against recordings of real software, with the image digests it was tested on.
+
+Signatures are produced by the [signature factory](factory/README.md), which runs software in Docker, records its replies, drafts signatures and checks them. Until a service has a signature, detection falls back to simple built-in parsers for SSH, HTTP, FTP and SMTP banners.
+
+Extra signature files can be added at run time with `--signatures FILE`.
+
+## Optional data files
+
+Read from the working directory if present:
+
+- `oui.csv`: MAC vendor names, from the [IEEE registry](https://standards-oui.ieee.org/oui/oui.csv)
+- `nmap-services`: port frequency data for `--top-ports` and `-F`. Without it, a built-in list is used.
+- `nmap-os-db`: OS fingerprints for `-O`
 
 ## Usage
 
@@ -33,28 +41,26 @@ These files are from the [nmap project](https://github.com/nmap/nmap/) and are n
 # Basic scan
 tokmap -t 192.168.1.1 -p 80,443,22
 
-# Top 100 ports (frequency-ranked from nmap-services)
+# Top 100 ports
 tokmap -t 192.168.1.1 -F
 
-# Top N ports
-tokmap -t 192.168.1.1 --top-ports 50
-
-# Service detection (banner grabbing + nmap signature matching)
+# Service detection
 tokmap -t 192.168.1.1 -p 80,443,22 -s
 
-# OS detection
-tokmap -t 192.168.1.1 -p 80,443 -O
+# UDP and TCP ports in one scan
+tokmap -t 192.168.1.1 --udp --syn -p U:53,161,T:22,80
 
-# CIDR range
+# CIDR range, IPv4 or IPv6
 tokmap -t 192.168.1.0/24 --top-ports 20
+tokmap -t fd00::/120 -p 22,80
 
-# IP range
-tokmap -t 192.168.1.1-50 -F
+# Path to the host
+tokmap -t 192.168.1.1 -p 443 --traceroute
 
-# Timing templates (T0=paranoid .. T5=insane)
-tokmap -t 192.168.1.1 -T4 -F
+# Save every probe's raw reply, as evidence for building signatures
+tokmap -t 127.0.0.1 -p 6379 --connect --record evidence/
 
-# LLM-assisted banner analysis (requires GEMINI_API_KEY env var)
+# LLM-assisted banner analysis (needs ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY or OLLAMA_HOST)
 tokmap -t 192.168.1.1 -p 80 -s --llm
 ```
 
@@ -64,19 +70,22 @@ tokmap -t 192.168.1.1 -p 80 -s --llm
 |------|------|-----------|
 | `--syn` / `-S` | TCP SYN (default) | Admin/root |
 | `--connect` | TCP connect | None |
-| `--ack` / `-A` | TCP ACK | Admin/root |
-| `--window` / `-W` | TCP Window | Admin/root |
+| `--ack` | TCP ACK | Admin/root |
+| `--window` | TCP Window | Admin/root |
 | `--fin` | TCP FIN | Admin/root |
-| `--null` / `-N` | TCP NULL | Admin/root |
-| `--xmas` / `-X` | TCP Xmas | Admin/root |
-| `--udp` / `-U` | UDP | Admin/root |
+| `--null` | TCP NULL | Admin/root |
+| `--xmas` | TCP Xmas | Admin/root |
+| `--udp` / `-U` | UDP | None |
+
+SYN falls back to a connect scan when no raw route exists, for example to loopback. The other raw types report an error instead.
 
 ### Output formats
 
-- Default: nmap-style table to terminal
-- `--json-only`: JSON to stdout
-- `-o file.json`: JSON to file
-- XML and grepable output available via library API (`OutputFormatter::write_xml`, `OutputFormatter::write_grepable`)
+- Default: table to terminal
+- `--json-only`: JSON to stdout (logs go to stderr)
+- `-o FILE`: JSON to file
+- `--xml FILE`: XML
+- `--grepable FILE`: one line per host
 
 ## Architecture
 
@@ -84,35 +93,39 @@ tokmap -t 192.168.1.1 -p 80 -s --llm
 src/
   lib.rs            -- module exports
   bin/main.rs       -- CLI entry point (clap)
-  scanner.rs        -- core scan engine (raw sockets via pnet, async via tokio)
-  packet.rs         -- TCP/IP packet construction and response parsing
-  udp.rs            -- UDP probes (18 protocol-specific payloads)
-  service.rs        -- banner grabbing and service identification
-  service_db/       -- nmap-service-probes parser and matcher
-  os_db.rs          -- nmap-os-db parser
-  nmap_data.rs      -- parsers for nmap-services, nmap-mac-prefixes, nmap-rpc, nmap-protocols
-  target.rs         -- CIDR, IP range, hostname resolution
-  timing.rs         -- timing templates (T0-T5)
-  ports.rs          -- port selection (nmap frequency data with hardcoded fallback)
-  discovery.rs      -- host discovery (TCP ping)
-  output.rs         -- output formatters (table, JSON, XML, grepable)
-  llm/              -- Gemini API client for LLM-assisted analysis
-  types.rs          -- shared types
+  bin/tokmap-replay.rs -- matches recorded replies against signature files
+  scanner.rs        -- scan orchestration
+  connect.rs        -- TCP and UDP socket probing, retries, socket and rate limits
+  route.rs          -- next-hop lookup, ARP and ICMP host discovery
+  packet.rs         -- raw packet construction and reply parsing
+  trace.rs          -- TCP traceroute
+  udp.rs            -- UDP probe payloads
+  service.rs        -- service detection and reply recording
+  service_db/       -- signature parser and matcher
+  tls.rs            -- TLS handshakes and certificate details
+  os_db.rs          -- OS fingerprint matching
+  target.rs         -- CIDR, IP range, hostname and reverse DNS resolution
+  ports.rs          -- port selection
+  discovery.rs      -- TCP host discovery
+  vendors.rs        -- MAC vendor lookup
+  output.rs         -- output formatters
+  llm/              -- LLM clients for assisted analysis
+signatures/         -- probes and verified signatures
+factory/            -- the signature factory
 ```
 
 ## Limitations
 
 This is an early-stage project. Known limitations:
 
-- **Service detection is passive only.** Tokmap matches banners against the nmap signature database but does not actively send nmap probe payloads. Detection accuracy is lower than nmap for services that don't send banners unprompted.
-- **OS fingerprinting is simplified.** The full nmap-os-db is loaded and parsed, but matching uses only TTL and window size heuristics. Nmap's full fingerprinting suite (SEQ, OPS, WIN, ECN, T1-T7 tests) is not implemented.
-- **IPv4 only.** No IPv6 support.
-- **Reverse DNS is not implemented.**
-- **Windows-focused development.** Tested primarily on Windows. Should work on Linux/macOS but not extensively tested.
-- **No scripting engine.** Nmap's NSE equivalent does not exist.
+- **The signature set is just starting.** See [Service signatures](#service-signatures).
+- **Some raw features are only unit-tested.** ACK, Window, FIN, NULL and Xmas scans, traceroute, ICMP discovery, SYN through a gateway and raw IPv6 are tested on packet building and parsing, not yet on live networks.
+- **OS fingerprinting is partial.** It needs a raw IPv4 route, sends 10 probe packets and scores a subset of tests.
+- **Host discovery** uses ARP on the local network, ICMP echo beyond it, and TCP when raw packets are unavailable. With more than one target, hosts that answer none of these count as down. Use `-P` to scan them anyway.
+- **No scripting engine.**
 - **Raw socket scanning requires admin/root.** TCP connect scan (`--connect`) works without privileges.
-- **UDP scanning is basic.** Sends protocol-specific probes for 18 common services but lacks the full nmap UDP probe set.
-- **LLM integration requires a Gemini API key** and makes external API calls. It is entirely optional.
+- **LLM integration requires an API key or Ollama** and sends service banners to that provider. It is entirely optional.
+- **The desktop app in `src-tauri/` is out of date** and does not build.
 - **Not audited for production use.** Do not rely on this for security-critical assessments.
 
 ## Legal

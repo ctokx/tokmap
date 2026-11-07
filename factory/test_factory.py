@@ -1,0 +1,92 @@
+import re
+import unittest
+
+from factory import draft_signature, escape, probe_rarities, product_pattern, versioned_pattern
+
+REDIS = {"image": "redis", "service": "redis", "product": "Redis", "tags": []}
+
+
+def info(version, uptime):
+    return f"$400\r\n# Server\r\nredis_version:{version}\r\nuptime_in_seconds:{uptime}\r\n".encode()
+
+
+def http(version, date):
+    return f"HTTP/1.1 200 OK\r\nDate: {date}\r\nServer: nginx/{version}\r\n\r\n".encode()
+
+
+def matches(pattern, data):
+    return re.search(pattern.encode(), data, re.S)
+
+
+class DraftTests(unittest.TestCase):
+    def test_versioned_pattern_captures_every_version(self):
+        samples = [("7.2.4", info("7.2.4", 5)), ("6.2.14", info("6.2.14", 917))]
+        pattern = versioned_pattern(samples)
+        for version, data in samples:
+            self.assertEqual(matches(pattern, data).group(1).decode(), version)
+
+    def test_context_skips_lines_that_change(self):
+        samples = [("1.25.3", http("1.25.3", "Fri, 06 Nov")), ("1.24.0", http("1.24.0", "Mon, 01 Jan"))]
+        pattern = versioned_pattern(samples)
+        self.assertIn("Server: nginx/", pattern)
+        self.assertNotIn("Nov", pattern)
+        self.assertEqual(matches(pattern, http("1.27.0", "Tue, 02 Feb")).group(1), b"1.27.0")
+
+    def test_other_products_do_not_match(self):
+        pattern = versioned_pattern([("1.25.3", http("1.25.3", "a")), ("1.24.0", http("1.24.0", "b"))])
+        self.assertIsNone(matches(pattern, b"HTTP/1.1 200 OK\r\nServer: Apache/2.4.58\r\n\r\n"))
+
+    def test_a_shared_digit_of_a_length_is_not_used(self):
+        samples = [("8.1.0", b"$5539\r\nvalkey_version:8.1.0\r\n"), ("7.2.7", b"$5102\r\nvalkey_version:7.2.7\r\n")]
+        pattern = versioned_pattern(samples)
+        self.assertEqual(matches(pattern, b"$4012\r\nvalkey_version:9.0.0\r\n").group(1), b"9.0.0")
+
+    def test_json_context_keeps_only_the_field_name(self):
+        def reply(version, date):
+            return f'{{"commitDate":"{date}.000000000Z","pkgVersion":"{version}"}}'.encode()
+        pattern = versioned_pattern([("1.12.0", reply("1.12.0", "2024-12-23")), ("1.11.3", reply("1.11.3", "2024-11-14"))])
+        self.assertNotIn("000Z", pattern)
+        self.assertEqual(matches(pattern, b'{"commitDate":"2025-01-01T00:00:00Z","pkgVersion":"1.13.0"}').group(1), b"1.13.0")
+
+    def test_too_little_context_is_refused(self):
+        self.assertIsNone(versioned_pattern([("1.2", b"1.2"), ("1.3", b"1.3")]))
+        self.assertIsNone(versioned_pattern([("1.2", b"no version here")]))
+
+    def test_product_pattern_needs_the_name_and_two_tags(self):
+        samples = [("1", b"+OK redis ready\r\nextra"), ("2", b"+OK redis ready\r\nother")]
+        self.assertIsNotNone(product_pattern(samples, ["Redis"]))
+        self.assertIsNone(product_pattern(samples, ["Postgres"]))
+        self.assertIsNone(product_pattern(samples[:1], ["Redis"]))
+
+    def test_escape_never_emits_the_delimiter_or_regex_syntax(self):
+        text = escape(b"a|b.c*(d)\\e[f]?+^$\x00\xff")
+        self.assertNotIn("|", text)
+        self.assertTrue(re.fullmatch(escape(b"a|b.c*(d)").encode(), b"a|b.c*(d)"))
+
+    def test_draft_names_the_probe_and_versions(self):
+        evidence = {
+            "7.2.4": [{"protocol": "tcp", "probe": "RedisInfo", "response_hex": info("7.2.4", 3).hex()}],
+            "6.2.14": [{"protocol": "tcp", "probe": "RedisInfo", "response_hex": info("6.2.14", 9).hex()}],
+        }
+        text = draft_signature(REDIS, evidence)
+        self.assertIn("Signatures TCP RedisInfo\n", text)
+        self.assertRegex(text, r"match redis m\|.+\|s p/Redis/ v/\$1/")
+
+    def test_commonly_sent_probes_are_preferred(self):
+        def reply(version):
+            return f"HTTP/1.1 404 Not Found\r\nServer: nginx/{version}\r\n".encode().hex()
+
+        probes = ("Rare", "Common", "Middle", "Other")
+        evidence = {tag: [{"protocol": "tcp", "probe": p, "response_hex": reply(tag)} for p in probes]
+                    for tag in ("1.2.3", "1.3.0")}
+        rarities = {"Rare": 9, "Common": 1, "Middle": 4, "Other": 6}
+        text = draft_signature({"image": "nginx", "service": "http", "product": "nginx"}, evidence, rarities)
+        self.assertEqual(re.findall(r"Signatures TCP (\w+)", text), ["Common", "Middle", "Other"])
+
+    def test_rarities_are_read_from_the_probe_file(self):
+        text = "Probe TCP Empty q||\nProbe TCP A q|x|\nrarity 3\nProbe TCP B q|y|\n"
+        self.assertEqual(probe_rarities(text), {"Empty": 0, "A": 3, "B": 5})
+
+
+if __name__ == "__main__":
+    unittest.main()
