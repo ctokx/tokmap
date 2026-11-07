@@ -116,7 +116,7 @@ def name_before(prefixes, before_len, names):
     return b"", 0
 
 
-def versioned_pattern(samples, names=()):
+def versioned_pattern(samples, names=(), required=()):
     """A regex capturing the version, from (version, reply) pairs, or None if too weak.
 
     When the product's name appears earlier in every reply, the pattern requires it, so a
@@ -156,7 +156,10 @@ def versioned_pattern(samples, names=()):
     if end:
         after = after[:end.end()]
 
-    if len(start) + len(before) + len(after) < MIN_LITERAL:
+    # Short binary greetings leave little fixed text around the version. Identifying strings
+    # from the same reply can make up for it.
+    short = len(start) + len(before) + len(after) < MIN_LITERAL
+    if short and not required:
         return None
     gap = "" if all(r == rests[0] for r in rests) and rests[0] == before else ".*?"
     if not mentions(start + before + after, names):
@@ -165,7 +168,8 @@ def versioned_pattern(samples, names=()):
             start = start[:earliest]  # the name may begin inside the shared start
             gap = f".*?{escape(name)}.*?"
     capture = f"({version_class([v for v, _ in samples])})"
-    return f"^{escape_any_number(start)}{gap}{escape(before)}{capture}{escape(after)}"
+    also = "".join(f"(?=.*?{escape(m)})" for m in required) if short else ""
+    return f"^{also}{escape_any_number(start)}{gap}{escape(before)}{capture}{escape(after)}"
 
 
 def product_pattern(samples, names):
@@ -305,7 +309,11 @@ def draft_signature(entry, evidence, rarities=None, others=()):
         version = version_of(entry, tag)
         for r in recordings:
             key = (r["protocol"].upper(), r["probe"])
-            groups.setdefault(key, {}).setdefault(tag, (version, bytes.fromhex(r["response_hex"])))
+            reply = bytes.fromhex(r["response_hex"])
+            by_tag = groups.setdefault(key, {})
+            # A probe may be answered on several ports: keep the reply that shows the version.
+            if tag not in by_tag or (version.encode() in reply and version.encode() not in by_tag[tag][1]):
+                by_tag[tag] = (version, reply)
 
     candidates = []
     product_names = [entry["product"], entry["image"].split("/")[-1]]
@@ -314,7 +322,8 @@ def draft_signature(entry, evidence, rarities=None, others=()):
             continue  # every recorded tag must have answered this probe
         samples = list(by_tag.values())
         rarity = rarities.get(probe, DEFAULT_RARITY)
-        pattern = versioned_pattern(samples, product_names)
+        found = markers(samples, others) if others else []
+        pattern = versioned_pattern(samples, product_names, found)
         if pattern:
             # Patterns that name the product rank first: they are least likely to match others.
             nameless = not any(n.lower() in pattern.lower() for n in product_names)
@@ -666,8 +675,11 @@ def main():
         for entry in images:
             others = [reply for image, found in replies.items() if image != slug(entry["image"]) for reply in found]
             text = draft_signature(entry, listed_evidence(entry), rarities, others)
+            draft = DRAFTS / f"{slug(entry['image'])}.matches"
             if text:
-                (DRAFTS / f"{slug(entry['image'])}.matches").write_text(text, encoding="utf8", newline="\n")
+                draft.write_text(text, encoding="utf8", newline="\n")
+            elif draft.exists():
+                draft.unlink()  # an old draft must not be verified as if it were new
             print(f"  {entry['image']}: {'drafted' if text else 'no clear signature, needs a hand-written draft'}")
     elif args.command == "verify":
         failed = [e["image"] for e in images if not verify(e)]

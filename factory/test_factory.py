@@ -150,6 +150,25 @@ class DraftTests(unittest.TestCase):
                                      ("1.23.1", build("1.23.1", "2024-07-30T10:22:18Z"))])
         self.assertEqual(matches(pattern, build("1.22.0", "2024-07-01T09:00:05Z")).group(1), b"1.22.0")
 
+    def test_short_binary_greeting_uses_identifying_strings(self):
+        def greeting(version, connection):
+            body = b"\n" + version.encode() + b"\x00" + bytes([connection, 0, 0, 0]) + b"salt\x00caching_sha2_password\x00"
+            return bytes([len(body), 0, 0, 0]) + body
+        samples = [("26.7.0", greeting("26.7.0", 12)), ("9.7.4", greeting("9.7.4", 12))]
+        self.assertIsNone(versioned_pattern(samples))
+        pattern = versioned_pattern(samples, required=[b"caching_sha2_password"])
+        self.assertEqual(matches(pattern, greeting("26.10.0", 40)).group(1), b"26.10.0")
+        self.assertIsNone(matches(pattern, greeting("26.10.0", 40).replace(b"caching_sha2", b"mysql_native")))
+
+    def test_the_reply_showing_the_version_is_used_when_several_ports_answer(self):
+        def tag(version):
+            return [{"protocol": "tcp", "probe": "Empty", "port": 33060, "response_hex": b"\x05\x00\x00\x00\x0b".hex()},
+                    {"protocol": "tcp", "probe": "Empty", "port": 3306,
+                     "response_hex": f"HELLO server {version}\r\n".encode().hex()}]
+        evidence = {"1.2.3": tag("1.2.3"), "1.3.0": tag("1.3.0")}
+        text = draft_signature({"image": "demo", "service": "demo", "product": "Demo"}, evidence)
+        self.assertIn("server (", text)
+
     def test_too_little_context_is_refused(self):
         self.assertIsNone(versioned_pattern([("1.2", b"1.2"), ("1.3", b"1.3")]))
         self.assertIsNone(versioned_pattern([("1.2", b"no version here")]))
