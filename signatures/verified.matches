@@ -351,3 +351,52 @@ match http m|^HTTP/\d+\.\d+ \d+ Not Found\r\n.*?surreal-version: surrealdb-(\d+(
 Signatures TCP HttpHead
 match http m|^.*?surreal-version: surrealdb-(\d+(?:\.\d+)*)\r\n|s p/SurrealDB/ v/$1/
 # END surrealdb/surrealdb
+
+# BEGIN adminer
+# tested: adminer:6.0.1 adminer@sha256:51262b555d9e8ac3e1fa197eec41a3f47d05aea5520ac2ccc78a03ffc7d39b3a
+# tested: adminer:6.1.2 adminer@sha256:251295c1cd51d3889f1c42ffa4864b24eeab51f0caf395cfe5bf4726c5ec9a2a
+# tested: adminer:6.2.0 adminer@sha256:400af848ac3f57938abde4867677df1b195674d232c8896a27d111d04b9c088c
+# tested: adminer:6.3.0 adminer@sha256:3a07decd833c2375ea749aa8018250c1db4859a78bd55354f797bfb591733233
+Signatures TCP HttpRoot
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?Adminer.*?="\?file=default\.css&amp;version=(\d+(?:\.\d+)*)|s p/Adminer/ v/$1/
+Signatures TCP HttpMissing
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?Adminer.*?th\?file=default\.css&amp;version=(\d+(?:\.\d+)*)|s p/Adminer/ v/$1/
+Signatures TCP HttpConsole
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?Adminer.*?le\?file=default\.css&amp;version=(\d+(?:\.\d+)*)|s p/Adminer/ v/$1/
+# END adminer
+
+# BEGIN kong
+# tested: kong:3.6.1 kong@sha256:a42d2b4503e7b6674ca7914883bdb0d2274b806b0e397a6af28d1dd57aafce4e
+# tested: kong:3.7.1 kong@sha256:5d46b1fcb0c29a1e5739499ca8d7af9ce6a6531ab37d9ae42f49478103a4c4dc
+# tested: kong:3.8.0 kong@sha256:c36bf02a89bd660b785986b40c0e5e139f45b8552fa6da199f05061e1f0bfa22
+# tested: kong:3.9.4 kong@sha256:c1f5fbb80cd666b4b29b4e97875ecd64d93b01b23fb3083bc3e424b3bad5fdd5
+Signatures TCP HttpRoot
+match http m|^.*?Server: kong/(\d+(?:\.\d+)*)\r\n|s p/Kong/ v/$1/
+Signatures TCP TlsClientHello
+match http m|^.*?Server: kong/(\d+(?:\.\d+)*)\r\n|s p/Kong/ v/$1/
+Signatures TCP HttpHead
+match http m|^.*?Server: kong/(\d+(?:\.\d+)*)\r\n|s p/Kong/ v/$1/
+# END kong
+
+# BEGIN mongo-express
+# tested: mongo-express:0.49.0 mongo-express@sha256:6dad01e71ce0046b606871fb8bd7f5671ad6cc6003cddbd38552d22622565322
+# tested: mongo-express:0.54.0 mongo-express@sha256:effdf4c7665bbcbdd72adcb0b074c7f29583affb6eb37e2deea284c1a4400bda
+Signatures TCP HttpRoot
+match http m|^HTTP/\d+\.\d+ \d+ [^\r\n]*\r\n(?:[^\r\n]+\r\n)*?Set-Cookie: mongo-express=|s p/mongo-express/
+# END mongo-express
+
+# BEGIN solr
+# tested: solr:10.0.0 solr@sha256:56c09c83513c71f08792cc40f3f52102a881b8ed35e99e966dd9bf21bee0949a
+# tested: solr:10.1.0 solr@sha256:81e75780e0f3a3ea2d38eafdb6ec16b2028af9374f6c0b85485f8f2e5dd97beb
+Signatures TCP HttpRoot
+match http m|^H.*?Location: /solr/|s p/Apache Solr/
+# END solr
+
+# BEGIN zookeeper
+# tested: zookeeper:3.6.4 zookeeper@sha256:562211796bb63767ddf8ba35e18da9a3fe8b7489a00c7905068825603d512e46
+# tested: zookeeper:3.7.2 zookeeper@sha256:6c5ec2f492ab361c4adfe02ea87ea928a3461e1897e81868e09ee9ffbfac8e58
+# tested: zookeeper:3.8.7 zookeeper@sha256:05c6c9e270ae7b796e2c97e7df6d778d0e6640abaa6d3553e3d66529d271402e
+# tested: zookeeper:3.9.6 zookeeper@sha256:bbf678337a9242fcb6e49e51193855078ec515251cf11fe0bcfabae6a10e040a
+Signatures TCP ZookeeperSrvr
+match zookeeper m|^Zookeeper version: (\d+(?:\.\d+)*)-|s p/ZooKeeper/ v/$1/
+# END zookeeper
