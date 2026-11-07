@@ -66,17 +66,6 @@ Signatures TCP HttpApiHealth
 match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?\r\n\r\n\{\n  "database": "\w+",\n  "version": "(\d+(?:\.\d+)*)",\n  "commit": "|s p/Grafana/ v/$1/
 # END grafana/grafana
 
-# BEGIN influxdb
-# tested: influxdb:2.8.0 influxdb@sha256:e6d293bedc5800bc5f7f61af6335d90a355c78be88fa41e591431ff44df553a5
-# tested: influxdb:2.9.0 influxdb@sha256:05ea1901ea421acf031b74e65b737fc911500e7f61189380596f84da18963fd1
-Signatures TCP HttpRoot
-match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?X-Influxdb-Version: v(\d+(?:\.\d+)*)\r\n|s p/InfluxDB/ v/$1/
-Signatures TCP HttpHead
-match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?X-Influxdb-Version: v(\d+(?:\.\d+)*)\r\n|s p/InfluxDB/ v/$1/
-Signatures TCP HttpMissing
-match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?X-Influxdb-Version: v(\d+(?:\.\d+)*)\r\n|s p/InfluxDB/ v/$1/
-# END influxdb
-
 # BEGIN mariadb
 # tested: mariadb:12.3.2 mariadb@sha256:a02fe89cb597d4375812b2eac90cf9d0775d4686daa7f7cc750ebbcad7525bbc
 # tested: mariadb:12.3.3 mariadb@sha256:d46e102fa8b9b72bfcdeb56f9dd538742092119dc8b11f31fe662605cd234cd9
@@ -309,3 +298,33 @@ match http m|^.*?Server: Apache/(\d+(?:\.\d+)*) \(Unix\)|s p/Apache httpd/ v/$1/
 Signatures TCP HttpMissing
 match http m|^HTTP/\d+\.\d+ \d+ Not Found\r\n.*?Server: Apache/(\d+(?:\.\d+)*) \(Unix\)|s p/Apache httpd/ v/$1/
 # END httpd
+
+# BEGIN influxdb
+# tested: influxdb:2.3.0 influxdb@sha256:a4e31914474d0ccc23bb0d21b21c7c6543d13b117ff5971bbd5e4675d7e1c465
+# tested: influxdb:2.4.0 influxdb@sha256:b57e887fe503121f881561019f39aacba6747c85ebb5bae63cccd63ea515e4d2
+# tested: influxdb:2.5.1 influxdb@sha256:cf3f55ef67ab686029e8cffc2a5da36f8ebe98f07f7c10bba66c9165e2713a3c
+# tested: influxdb:2.6.1 influxdb@sha256:c3431c48e0ddf212ef899ac39034e7b3bacb90a6f4d87b698162ca985041caa8
+# tested: influxdb:2.7.12 influxdb@sha256:b8d940ca9376f85118260f5b6bd236b8a00b1749c3350c5578d4cde8e27f31f2
+# tested: influxdb:2.8.0 influxdb@sha256:e6d293bedc5800bc5f7f61af6335d90a355c78be88fa41e591431ff44df553a5
+# tested: influxdb:2.9.0 influxdb@sha256:05ea1901ea421acf031b74e65b737fc911500e7f61189380596f84da18963fd1
+# tested: influxdb:2.9.1 influxdb@sha256:e4572d094ac3272f06528ea904ce6b4cb3bb19be2db3b3b1acbd27ba5c3a73e2
+Signatures TCP HttpRoot
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?X-Influxdb-Version: v(\d+(?:\.\d+)*)|s p/InfluxDB/ v/$1/
+Signatures TCP HttpHead
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?X-Influxdb-Version: v(\d+(?:\.\d+)*)|s p/InfluxDB/ v/$1/
+Signatures TCP HttpMissing
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?X-Influxdb-Version: v(\d+(?:\.\d+)*)|s p/InfluxDB/ v/$1/
+# END influxdb
+
+# BEGIN traefik
+# tested: traefik:v3.6.25 traefik@sha256:31267173a15b4944e797a76ffd9c419707c8d8b32fe5b610f80cd0cfa05f372d
+# tested: traefik:v3.7.11 traefik@sha256:5203c3f39ca70de6790d964624e042463ffbd57715bc82be155cf224c0dd5144
+# tested: traefik:v3.7.12 traefik@sha256:9c2a54d87f76f5c2f5f2682c68394af92fb12c0a2686798d6462a3f84bd78eaf
+# tested: traefik:v3.7.13 traefik@sha256:24841fe2de7304c149343d877d2923b4c8800a38ba015dea9174c23b20e344a0
+# tested: traefik:v3.7.14 traefik@sha256:575fa15b135078fe5e50aa847987d96dbddd7b093c172429618404df73f3fa7c
+# tested: traefik:v3.7.15 traefik@sha256:0f6150202bc1fed72a7bd2107460eaa510e5b8a905f3fdb5b84f2c8619c33368
+# tested: traefik:v3.7.16 traefik@sha256:1336e85aaed293bd63d005086e0dd013b04078b26aaeb1c18b26a2f928af7e65
+# tested: traefik:v3.7.17 traefik@sha256:f4bb143d1135a579b630ed491e17ec50f6f7c9c6a30585ff3d385471d2a86f5a
+Signatures TCP TlsClientHello
+match http m|^\x16\x03[\x01-\x04].*?\x06\x03U\x04\x03\x13\x14TRAEFIK DEFAULT CERT|s p/Traefik/
+# END traefik
