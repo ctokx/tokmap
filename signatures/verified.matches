@@ -52,13 +52,6 @@ Signatures TCP MongoBuildInfo
 match mongodb m|^.*?ferretdbVersion\x00\x08\x00\x00\x00v(\d+(?:\.\d+)*)\x00|s p/FerretDB/ v/$1/
 # END ghcr.io/ferretdb/ferretdb
 
-# BEGIN gitea/gitea
-# tested: gitea/gitea:1.21.11 gitea/gitea@sha256:0056032dc8c6ab70583e4a105b9ee0dc72dce4f4fbc8022c98bcec46b0273883
-# tested: gitea/gitea:1.22.6 gitea/gitea@sha256:538658de667c5d098a274f2f63aa6ec891d88f670cdd5282cf27221ba747dda4
-Signatures TCP HttpRoot
-match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?gitea.*?ionEncoded: encodeURIComponent\('(\d+(?:\.\d+)*)'\),|s p/Gitea/ v/$1/
-# END gitea/gitea
-
 # BEGIN grafana/grafana
 # tested: grafana/grafana:11.2.2 grafana/grafana@sha256:d5133220d770aba5cb655147b619fa8770b90f41d8489a821d33b1cd34d16f89
 # tested: grafana/grafana:11.3.1 grafana/grafana@sha256:fa801ab6e1ae035135309580891e09f7eb94d1abdbd2106bdc288030b028158c
@@ -228,17 +221,6 @@ Signatures TCP HttpMissing
 match http m|^HTTP/[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?Docker-Distribution-Api-Version: registry/2\.0\r\n|s p/Docker Registry/
 # END registry
 
-# BEGIN surrealdb/surrealdb
-# tested: surrealdb/surrealdb:v2.0.4 surrealdb/surrealdb@sha256:88c3fab9a0d7dbace30ee19ee2f437133cfa23861873847a188f72cad1699390
-# tested: surrealdb/surrealdb:v2.1.4 surrealdb/surrealdb@sha256:51769e7578580549a988621cd4699408c118127991a0a5b9ce8b485e7af7ae33
-Signatures TCP HttpRoot
-match http m|^HTTP/\d+\.\d+ \d+ Temporary R.*?surreal-version: surrealdb-(\d+(?:\.\d+)*)\r\n|s p/SurrealDB/ v/$1/
-Signatures TCP HttpMissing
-match http m|^HTTP/\d+\.\d+ \d+ Not Found\r\n.*?surreal-version: surrealdb-(\d+(?:\.\d+)*)\r\n|s p/SurrealDB/ v/$1/
-Signatures TCP HttpHead
-match http m|^HTTP/\d+\.\d+ \d+ Temporary R.*?surreal-version: surrealdb-(\d+(?:\.\d+)*)\r\n|s p/SurrealDB/ v/$1/
-# END surrealdb/surrealdb
-
 # BEGIN tomcat
 # tested: tomcat:10.1.61 tomcat@sha256:25faef1c4511da46b059ae2afc778461f248bf942b9fc4cdd445b65dc7daf49a
 # tested: tomcat:9.0.123 tomcat@sha256:3f58672d56a92628d88b74e221150680120f17b7b973446736175f420d5c9ff3
@@ -257,13 +239,6 @@ Signatures TCP HttpRoot
 match http m|^H.*?Location: http://localhost/wp-admin/setup-config\.php|s p/WordPress/
 # END wordpress
 
-# BEGIN ghcr.io/microsoft/garnet
-# tested: ghcr.io/microsoft/garnet:1.0.44 ghcr.io/microsoft/garnet@sha256:20f12649eee74f196db8c4409954cb8a64a5dfb7dc979d8d8eee87d6e34a874a
-# tested: ghcr.io/microsoft/garnet:1.0.46 ghcr.io/microsoft/garnet@sha256:61e340a8a9dab242a36fa3b3647698360b98b057b0da91c1386871a09af2346b
-Signatures TCP RedisInfo
-match redis m|^\$\d+\r\n# Server\r\ngarnet_version:(\d+(?:\.\d+)*)\r\n|s p/Garnet/ v/$1/
-# END ghcr.io/microsoft/garnet
-
 # BEGIN valkey/valkey
 # tested: valkey/valkey:7.2.7 valkey/valkey@sha256:6954650f4f9679d3773c13de9b7404e92838421870901b83c677c14b1254872f
 # tested: valkey/valkey:8.0.2 valkey/valkey@sha256:57bcc49c6ade1813ef25206c571b65b66bb0094235ff7fb767941622892297d9
@@ -271,6 +246,14 @@ match redis m|^\$\d+\r\n# Server\r\ngarnet_version:(\d+(?:\.\d+)*)\r\n|s p/Garne
 Signatures TCP RedisInfo
 match redis m|^.*?valkey_version:(\d+(?:\.\d+)*)\r\n|s p/Valkey/ v/$1/
 # END valkey/valkey
+
+# BEGIN ghcr.io/microsoft/garnet
+# tested: ghcr.io/microsoft/garnet:1.0.44 ghcr.io/microsoft/garnet@sha256:20f12649eee74f196db8c4409954cb8a64a5dfb7dc979d8d8eee87d6e34a874a
+# tested: ghcr.io/microsoft/garnet:1.0.46 ghcr.io/microsoft/garnet@sha256:61e340a8a9dab242a36fa3b3647698360b98b057b0da91c1386871a09af2346b
+# tested: ghcr.io/microsoft/garnet:1.0.6 ghcr.io/microsoft/garnet@sha256:23f7c2d898dd2197b98ccf9c0092e6a1db7f5ae6dc63d158ef57d901816df6c1
+Signatures TCP RedisInfo
+match redis m|^.*?garnet_version:(\d+(?:\.\d+)*)\r\n|s p/Garnet/ v/$1/
+# END ghcr.io/microsoft/garnet
 
 # BEGIN redis
 # tested: redis:6.2.16 redis@sha256:d74db717c8b8a7be8e3cc949b4ad7cf4b87276ff2a47bb487ef0f5f05430c0f9
@@ -336,3 +319,35 @@ Signatures TCP TlsClientHello
 match http m|^\x16\x03[\x01-\x04].*?Elasticsearch security auto-configuration HTTP CA|s p/Elasticsearch/
 match elasticsearch m|^\x16\x03[\x01-\x04].*?Elasticsearch security auto-configuration transport CA|s p/Elasticsearch/
 # END elasticsearch
+
+# BEGIN gitea/gitea
+# tested: gitea/gitea:1.20.6 gitea/gitea@sha256:fd4b4cbfb1b1e0080e41580da42a5d4e6fff58467d012f14e4ffaa81944e2d8b
+# tested: gitea/gitea:1.21.11 gitea/gitea@sha256:0056032dc8c6ab70583e4a105b9ee0dc72dce4f4fbc8022c98bcec46b0273883
+# tested: gitea/gitea:1.22.6 gitea/gitea@sha256:538658de667c5d098a274f2f63aa6ec891d88f670cdd5282cf27221ba747dda4
+# tested: gitea/gitea:1.23.8 gitea/gitea@sha256:8b5a98abe52dacbead16eb4179c9abb7c217d523df3a75901343906ae7853357
+# tested: gitea/gitea:1.24.7 gitea/gitea@sha256:918955f16b1e91732af6c449bb2db3a34271748dbed1ccfbae48f8a2fb5480b8
+# tested: gitea/gitea:1.25.5 gitea/gitea@sha256:f846d26a4fc389c5806a580a765e00bfdd1fd181e6f2060da98ea2669d914472
+# tested: gitea/gitea:1.26.4 gitea/gitea@sha256:8e25c717b8f748445e15ec46e0390f577cb628101184cb0a150d1dae126c1f39
+# tested: gitea/gitea:1.27.3 gitea/gitea@sha256:87a67ee09d3ae0d1df5fda5dcda3e2a1f9236a45b0a59025d6e00e46adc43bef
+Signatures TCP HttpRoot
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?gitea.*?ionEncoded: encodeURIComponent\('(\d+(?:\.\d+)*)'\),|s p/Gitea/ v/$1/
+Signatures TCP HttpRoot
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n(?:[^\r\n]+\r\n)*?Set-Cookie: i_like_gitea=|s p/Gitea/
+# END gitea/gitea
+
+# BEGIN surrealdb/surrealdb
+# tested: surrealdb/surrealdb:v2.0.4 surrealdb/surrealdb@sha256:88c3fab9a0d7dbace30ee19ee2f437133cfa23861873847a188f72cad1699390
+# tested: surrealdb/surrealdb:v2.1.4 surrealdb/surrealdb@sha256:51769e7578580549a988621cd4699408c118127991a0a5b9ce8b485e7af7ae33
+# tested: surrealdb/surrealdb:v2.2.8 surrealdb/surrealdb@sha256:477f20dfa851c99b5dbeacdfe3bd5f2aeb1b8d731e0cfd0e486dcda4724256b0
+# tested: surrealdb/surrealdb:v2.3.10 surrealdb/surrealdb@sha256:e3322f21b3135dd4893e6487874481333b03bc731d7da200d716a8564b4f0a92
+# tested: surrealdb/surrealdb:v2.4.1 surrealdb/surrealdb@sha256:cb06f83535d4b7790f16e1632cef2347718d62d18629d595383f43ff9e0ee794
+# tested: surrealdb/surrealdb:v2.5.0 surrealdb/surrealdb@sha256:9dc8a49cdb00014e14624e69647c8683b3bc6b68d0dc04faa835ae35e899c0e4
+# tested: surrealdb/surrealdb:v2.6.5 surrealdb/surrealdb@sha256:d653f6c8a89e81f865ee31cd2f587c50f50ace922175e04150b1e385d2f86011
+# tested: surrealdb/surrealdb:v2.7.0 surrealdb/surrealdb@sha256:e5d7387e3727bbe2f7cd6d869e48cd34777272258572ead37c9656b25f745723
+Signatures TCP HttpRoot
+match http m|^.*?surreal-version: surrealdb-(\d+(?:\.\d+)*)\r\n|s p/SurrealDB/ v/$1/
+Signatures TCP HttpMissing
+match http m|^HTTP/\d+\.\d+ \d+ Not Found\r\n.*?surreal-version: surrealdb-(\d+(?:\.\d+)*)\r\n|s p/SurrealDB/ v/$1/
+Signatures TCP HttpHead
+match http m|^.*?surreal-version: surrealdb-(\d+(?:\.\d+)*)\r\n|s p/SurrealDB/ v/$1/
+# END surrealdb/surrealdb
