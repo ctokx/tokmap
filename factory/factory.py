@@ -179,9 +179,15 @@ def product_pattern(samples, names):
     start = common_prefix([data for _, data in samples])[:MAX_START + MAX_BEFORE]
     if len(start) < MIN_PRODUCT_START:
         return None
-    if not any(name.lower().encode() in start.lower() for name in names if name):
+    found = [start.lower().find(n.lower().encode()) for n in names if n and n.lower().encode() in start.lower()]
+    if not found:
         return None
-    return f"^{escape(start)}"
+    # Only the line that names the product: earlier lines may carry a date or a counter.
+    at = min(found)
+    line_start = max(start.rfind(b"\n", 0, at), start.rfind(b"\x00", 0, at)) + 1
+    ends = [i for i in (start.find(b"\r", at), start.find(b"\n", at), start.find(b"\x00", at)) if i >= 0]
+    line = escape_any_number(start[line_start:min(ends, default=len(start))])
+    return f"^{line}" if line_start == 0 else f"^{escape(start[:1])}.*?{line}"
 
 
 def probe_rarities(text):
@@ -334,7 +340,7 @@ def draft_signature(entry, evidence, rarities=None, others=()):
         if len(lines) > 1:
             candidates.append((1, False, rarity, -len(lines), protocol, probe, lines))
             continue
-        pattern = product_pattern(samples, product_names + [entry["service"]])
+        pattern = product_pattern(samples, product_names)  # not the service: "http" starts every HTTP reply
         if pattern or lines:
             chosen = [(pattern, None)] if pattern else lines
             candidates.append((2, False, rarity, -len(chosen[0][0]), protocol, probe, chosen))

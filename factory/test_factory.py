@@ -179,6 +179,13 @@ class DraftTests(unittest.TestCase):
         self.assertIsNone(product_pattern(samples, ["Postgres"]))
         self.assertIsNone(product_pattern(samples[:1], ["Redis"]))
 
+    def test_product_pattern_keeps_only_the_naming_line(self):
+        samples = [("1", b"HTTP/1.1 200 OK\r\nDate: Sat, 07 Nov\r\nServer: Caddy\r\n\r\n"),
+                   ("2", b"HTTP/1.1 200 OK\r\nDate: Sat, 07 Nov\r\nServer: Caddy\r\n\r\nx")]
+        pattern = product_pattern(samples, ["Caddy"])
+        self.assertNotIn("Date", pattern)
+        self.assertTrue(re.match(pattern.encode(), b"HTTP/1.1 404 Not Found\r\nDate: Mon\r\nServer: Caddy\r\n", re.S))
+
     def test_escape_never_emits_the_delimiter_or_regex_syntax(self):
         text = escape(b"a|b.c*(d)\\e[f]?+^$\x00\xff")
         self.assertNotIn("|", text)
