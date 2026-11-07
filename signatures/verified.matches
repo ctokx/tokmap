@@ -66,17 +66,6 @@ Signatures TCP HttpApiHealth
 match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?\r\n\r\n\{\n  "database": "\w+",\n  "version": "(\d+(?:\.\d+)*)",\n  "commit": "|s p/Grafana/ v/$1/
 # END grafana/grafana
 
-# BEGIN httpd
-# tested: httpd:2.4.67 httpd@sha256:2a7deaaaf357261a1dffcb8fc725f4aaba2af95fbde1a40a68bca7cb0f03594e
-# tested: httpd:2.4.68 httpd@sha256:03f858efb82c25cb0f9962946615cdcdaf26927cb971722149b563197cfd0fdd
-Signatures TCP HttpRoot
-match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?Server: Apache/(\d+(?:\.\d+)*) \(Unix\)\r|s p/Apache httpd/ v/$1/
-Signatures TCP TlsClientHello
-match http m|^.*?Server: Apache/(\d+(?:\.\d+)*) \(Unix\)\r|s p/Apache httpd/ v/$1/
-Signatures TCP HttpMissing
-match http m|^HTTP/\d+\.\d+ \d+ Not Found\r\n.*?Server: Apache/(\d+(?:\.\d+)*) \(Unix\)\r|s p/Apache httpd/ v/$1/
-# END httpd
-
 # BEGIN influxdb
 # tested: influxdb:2.8.0 influxdb@sha256:e6d293bedc5800bc5f7f61af6335d90a355c78be88fa41e591431ff44df553a5
 # tested: influxdb:2.9.0 influxdb@sha256:05ea1901ea421acf031b74e65b737fc911500e7f61189380596f84da18963fd1
@@ -303,3 +292,20 @@ match redis m|^.*?valkey_version:(\d+(?:\.\d+)*)\r\n|s p/Valkey/ v/$1/
 Signatures TCP RedisInfo
 match redis m|^.*?redis_version:(\d+(?:\.\d+)*)\r\n|s p/Redis/ v/$1/
 # END redis
+
+# BEGIN httpd
+# tested: httpd:2.2.34 httpd@sha256:9784d70c8ea466fabd52b0bc8cde84980324f9612380d22fbad2151df9a430eb
+# tested: httpd:2.4.63 httpd@sha256:1ae8051591a5ded56e4a3d7399c423e940e8475ad0e5adb82e6e10893fe9b365
+# tested: httpd:2.4.64 httpd@sha256:ff7da4e158110cff0fdb0951a6859a971f9b4a1a7487427d1e039d640951a7f5
+# tested: httpd:2.4.65 httpd@sha256:f9b88f3f093d925525ec272bbe28e72967ffe1a40da813fe84df9fcb2fad3f30
+# tested: httpd:2.4.66 httpd@sha256:89a0b59e6d7285f00fc8df952a1579c31eb035cbdccb96690051e8bb6432cbea
+# tested: httpd:2.4.67 httpd@sha256:2a7deaaaf357261a1dffcb8fc725f4aaba2af95fbde1a40a68bca7cb0f03594e
+# tested: httpd:2.4.68 httpd@sha256:03f858efb82c25cb0f9962946615cdcdaf26927cb971722149b563197cfd0fdd
+# tested: httpd:2.4.69 httpd@sha256:f6a86043744215e4be90cf8804375d90022a711d892c9aa2d7085c089ee2cb54
+Signatures TCP HttpRoot
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?Server: Apache/(\d+(?:\.\d+)*) \(Unix\)|s p/Apache httpd/ v/$1/
+Signatures TCP TlsClientHello
+match http m|^.*?Server: Apache/(\d+(?:\.\d+)*) \(Unix\)|s p/Apache httpd/ v/$1/
+Signatures TCP HttpMissing
+match http m|^HTTP/\d+\.\d+ \d+ Not Found\r\n.*?Server: Apache/(\d+(?:\.\d+)*) \(Unix\)|s p/Apache httpd/ v/$1/
+# END httpd
