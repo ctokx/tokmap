@@ -371,13 +371,6 @@ Signatures TCP HttpRoot
 match http m|^HTTP/\d+\.\d+ \d+ [^\r\n]*\r\n(?:[^\r\n]+\r\n)*?Set-Cookie: mongo-express=|s p/mongo-express/
 # END mongo-express
 
-# BEGIN solr
-# tested: solr:10.0.0 solr@sha256:56c09c83513c71f08792cc40f3f52102a881b8ed35e99e966dd9bf21bee0949a
-# tested: solr:10.1.0 solr@sha256:81e75780e0f3a3ea2d38eafdb6ec16b2028af9374f6c0b85485f8f2e5dd97beb
-Signatures TCP HttpRoot
-match http m|^H.*?Location: /solr/|s p/Apache Solr/
-# END solr
-
 # BEGIN zookeeper
 # tested: zookeeper:3.6.4 zookeeper@sha256:562211796bb63767ddf8ba35e18da9a3fe8b7489a00c7905068825603d512e46
 # tested: zookeeper:3.7.2 zookeeper@sha256:6c5ec2f492ab361c4adfe02ea87ea928a3461e1897e81868e09ee9ffbfac8e58
@@ -410,3 +403,12 @@ match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?\{"installed":.*?"versionstring":"(\d+(
 Signatures TCP HttpRoot
 match http m|^H.*?X-Permitted-Cross-Domain-Policies: none.*?<html class="ng-csp" data-placeholder-focus="false" lang="en" data-locale="en" translate="no" >|s p/Nextcloud/
 # END nextcloud
+
+# BEGIN solr
+# tested: solr:10.0.0 solr@sha256:56c09c83513c71f08792cc40f3f52102a881b8ed35e99e966dd9bf21bee0949a
+# tested: solr:10.1.0 solr@sha256:81e75780e0f3a3ea2d38eafdb6ec16b2028af9374f6c0b85485f8f2e5dd97beb
+Signatures TCP HttpSolrSystem
+match http m|^HTTP/\d+\.\d+ \d+ OK\r\n.*?"solr-spec-version":"(\d+(?:\.\d+)*)"|s p/Apache Solr/ v/$1/
+Signatures TCP HttpRoot
+match http m|^H.*?Location: /solr/|s p/Apache Solr/
+# END solr
