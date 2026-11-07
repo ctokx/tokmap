@@ -32,8 +32,6 @@ Extra signature files can be added at run time with `--signatures FILE`.
 Read from the working directory if present:
 
 - `oui.csv`: MAC vendor names, from the [IEEE registry](https://standards-oui.ieee.org/oui/oui.csv)
-- `nmap-services`: port frequency data for `--top-ports` and `-F`. Without it, a built-in list is used.
-- `nmap-os-db`: OS fingerprints for `-O`
 
 ## Usage
 
@@ -103,9 +101,8 @@ src/
   service.rs        -- service detection and reply recording
   service_db/       -- signature parser and matcher
   tls.rs            -- TLS handshakes and certificate details
-  os_db.rs          -- OS fingerprint matching
   target.rs         -- CIDR, IP range, hostname and reverse DNS resolution
-  ports.rs          -- port selection
+  ports.rs          -- port selection; the ranking is signatures/tcp-ports.txt
   discovery.rs      -- TCP host discovery
   vendors.rs        -- MAC vendor lookup
   output.rs         -- output formatters

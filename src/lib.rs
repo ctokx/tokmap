@@ -1,9 +1,6 @@
 pub mod connect;
 pub mod discovery;
-pub mod os_probe;
 pub mod llm;
-pub mod nmap_data;
-pub mod os_db;
 pub mod output;
 pub mod packet;
 pub mod ports;
@@ -27,4 +24,3 @@ pub use llm::{LLMAnalyzer, LLMProvider, LLMAnalysis};
 pub use target::parse_targets;
 pub use timing::{TimingTemplate, TimingConfig};
 pub use discovery::DiscoveryMethod;
-pub use os_db::{OSDatabase, ObservedFingerprint};

@@ -210,16 +210,7 @@ async fn run(args: Args) -> Result<()> {
     let (ports, udp_ports) = if let Some(ref port_specs) = args.ports {
         ports::split_port_spec(port_specs)?
     } else {
-        let tcp = if args.fast {
-            ports::get_ports(Some(100), true)
-        } else if let Some(n) = args.top_ports {
-            ports::get_ports(Some(n), false)
-        } else {
-            vec![
-                21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995, 1723, 3306, 3389,
-                5900, 8080,
-            ]
-        };
+        let tcp = ports::top_tcp_ports(if args.fast { 100 } else { args.top_ports.unwrap_or(20) });
         (tcp, ports::TOP_UDP_PORTS.to_vec())
     };
 

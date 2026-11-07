@@ -1,6 +1,8 @@
 import re
 import unittest
 
+import gen_ports
+
 from factory import (draft_signature, escape, insert_block, markers, names_product, probe_rarities, product_pattern, split_blocks,
                      table_lines, version_matches, version_table, version_text,
                      version_of, versioned_pattern)
@@ -222,6 +224,16 @@ class DraftTests(unittest.TestCase):
     def test_rarities_are_read_from_the_probe_file(self):
         text = "Probe TCP Empty q||\nProbe TCP A q|x|\nrarity 3\nProbe TCP B q|y|\n"
         self.assertEqual(probe_rarities(text), {"Empty": 0, "A": 3, "B": 5})
+
+
+class PortRankingTests(unittest.TestCase):
+    def test_merge_keeps_first_rank_and_stops_at_the_limit(self):
+        self.assertEqual(gen_ports.merge([80, 22], [22, 8080], [1], want=3), [80, 22, 8080])
+
+    def test_pull_counts_are_read_from_rounded_text(self):
+        self.assertEqual(gen_ports.pull_count("1B+"), 10**9)
+        self.assertEqual(gen_ports.pull_count("10K+"), 10**4)
+        self.assertEqual(gen_ports.pull_count(None), 0)
 
 
 if __name__ == "__main__":

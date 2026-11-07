@@ -1,8 +1,6 @@
 use crate::connect::{self, Answer, Limits, Transport};
 use crate::discovery::{discover_hosts, DiscoveryMethod};
 use crate::llm::LLMAnalyzer;
-use crate::os_db::{OSDatabase, ObservedFingerprint};
-use crate::os_probe::{build_observed_fingerprint, find_closed_port, find_open_port, send_os_probes};
 use crate::packet::{
     build_probe_frame, interpret_response, parse_reply, random_source_port, silent_port_state,
     Reply, TcpFingerprint,
@@ -52,7 +50,6 @@ const VENDOR_FILE: &str = "oui.csv";
 pub struct Scanner {
     config: ScanConfig,
     service_matcher: Option<ServiceMatcher>,
-    os_db: Option<OSDatabase>,
     llm_provider_name: Option<String>,
     limits: Limits,
     raw_slots: Arc<Semaphore>,
@@ -123,25 +120,11 @@ impl Scanner {
                 }
             });
 
-        let os_db = config.os_detection.then(|| OSDatabase::load_from_file("nmap-os-db")).and_then(|loaded| {
-            match loaded {
-                Ok(db) => {
-                    info!("Loaded OS database");
-                    Some(db)
-                }
-                Err(e) => {
-                    warn!("Failed to load OS database: {}", e);
-                    None
-                }
-            }
-        });
-
         let limits = Limits::new(config.max_concurrent, config.rate_limit);
 
         Scanner {
             config,
             service_matcher: matcher,
-            os_db,
             llm_provider_name: llm_provider,
             limits,
             raw_slots: Arc::new(Semaphore::new(RAW_HOST_PARALLELISM)),
@@ -348,9 +331,7 @@ impl Scanner {
         self.record_responses(target, &ports).await?;
         self.analyze_with_llm(target, &mut ports).await;
 
-        let (os_guess, os_fingerprint) = self
-            .fingerprint_os(target, route.as_ref(), &ports, &fingerprints)
-            .await?;
+        let (os_guess, os_fingerprint) = self.guess_os(&fingerprints);
 
         let trace = if self.config.traceroute {
             self.trace_route(target, route.as_ref(), &ports).await
@@ -719,77 +700,14 @@ impl Scanner {
         tokio::task::spawn_blocking(move || trace::trace(&request, TRACE_WAIT)).await.ok()
     }
 
-    async fn fingerprint_os(
-        &self,
-        target: IpAddr,
-        route: Option<&RawRoute>,
-        port_results: &[PortResult],
-        fingerprints: &[TcpFingerprint],
-    ) -> Result<(Option<String>, Option<String>)> {
-        let passive_summary = || {
-            fingerprints.first().map(|f| format!("TTL={} WIN={}", f.ttl, f.window_size))
+    /// A coarse guess from the TTL of the replies the sweep already received, and the raw
+    /// values it was made from. Hosts start from a few usual TTLs, lowered by each hop.
+    fn guess_os(&self, fingerprints: &[TcpFingerprint]) -> (Option<String>, Option<String>) {
+        let Some(f) = fingerprints.first() else {
+            return (None, None);
         };
-
-        if !self.config.os_detection {
-            return Ok((None, passive_summary()));
-        }
-        let (Some(route), IpAddr::V4(dst_ip)) = (route, target) else {
-            warn!("OS detection needs a raw IPv4 route, skipping {}", target);
-            return Ok((None, None));
-        };
-        let IpAddr::V4(src_ip) = route.link.src_ip else {
-            return Ok((None, None));
-        };
-
-        let open_ports: Vec<u16> = port_results.iter()
-            .filter(|r| r.state == PortState::Open && r.protocol == Some(Protocol::TCP))
-            .map(|r| r.port)
-            .collect();
-
-        let observed = if let Some(open_port) = find_open_port(&open_ports) {
-            let closed_port = find_closed_port(&open_ports);
-            info!("Sending OS fingerprint probes to {}:{} (open) / {} (closed)", target, open_port, closed_port);
-
-            let interface = route.link.interface.clone();
-            let (src_mac, dst_mac) = (route.link.src_mac, route.dst_mac);
-            let probe_result = tokio::task::spawn_blocking(move || {
-                let (mut tx, mut rx) = open_capture(&interface).ok()?;
-                Some(send_os_probes(
-                    &mut tx, &mut rx,
-                    src_mac, dst_mac,
-                    src_ip, dst_ip,
-                    open_port, closed_port,
-                ))
-            }).await.ok().flatten();
-
-            probe_result.and_then(|r| build_observed_fingerprint(&r))
-        } else if !fingerprints.is_empty() {
-            let window_sizes: Vec<u16> = fingerprints.iter().map(|f| f.window_size).collect();
-            Some(ObservedFingerprint::from_responses(fingerprints[0].ttl, window_sizes, &[]))
-        } else {
-            None
-        };
-
-        if let Some(observed) = observed {
-            let summary = format!("TTL={} WIN={} SP={} GCD={} ISR={}",
-                observed.ttl,
-                observed.window_sizes.iter().map(|w| format!("{:X}", w)).collect::<Vec<_>>().join(","),
-                observed.sp, observed.gcd, observed.isr);
-
-            let guess = self.os_db.as_ref().and_then(|db| {
-                let matches = db.match_fingerprint(&observed);
-                matches.first().map(|best| {
-                    debug!("OS detection: {} candidates, best: {} ({:.0}%)", matches.len(), best.name, best.score * 100.0);
-                    format!("{} (score: {:.0}%)", best.name, best.score * 100.0)
-                })
-            });
-            return Ok((guess, Some(summary)));
-        }
-
-        let guess = fingerprints.first().and_then(|f| {
-            self.os_db.as_ref()?.match_os(f.ttl, f.window_size).map(|m| m.name.clone())
-        });
-        Ok((guess, passive_summary()))
+        let summary = format!("TTL={} WIN={}", f.ttl, f.window_size);
+        (self.config.os_detection.then(|| os_family(f.ttl).to_string()), Some(summary))
     }
 }
 
@@ -831,6 +749,15 @@ fn receive_replies(
     }
 }
 
+/// The OS family whose usual starting TTL (64, 128 or 255) is the nearest one at or above `ttl`.
+fn os_family(ttl: u8) -> &'static str {
+    match ttl {
+        0..=64 => "Linux, macOS or another Unix (by TTL)",
+        65..=128 => "Windows (by TTL)",
+        _ => "network device or Solaris (by TTL)",
+    }
+}
+
 fn get_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     format_utc(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs())
@@ -839,6 +766,14 @@ fn get_timestamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn os_family_allows_for_hops() {
+        assert!(os_family(64).starts_with("Linux"));
+        assert!(os_family(52).starts_with("Linux"));
+        assert!(os_family(116).starts_with("Windows"));
+        assert!(os_family(255).starts_with("network"));
+    }
 
     #[test]
     fn open_window_does_not_block() {
