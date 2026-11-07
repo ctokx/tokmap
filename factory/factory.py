@@ -224,13 +224,29 @@ def version_key(version):
 
 
 def version_text(versions, all_versions):
-    """`16.10-16.15` when no other recorded version falls between, else a list."""
+    """The versions sharing one field value, as text.
+
+    Unrecorded releases may share the value too. Between recorded neighbours that is bounded:
+    `16.11-16.13`. At the edge of what was recorded for a major version it is not, so the
+    open side says so: `17.9 or earlier`, `18.6 or later`, or `17.x` when both sides are open.
+    Values shared across major versions are listed: `16.4, 17.0`."""
     ordered = sorted(versions, key=version_key)
-    if len(ordered) == 1:
-        return ordered[0]
+    majors = {version_key(v)[:1] for v in ordered}
+    if len(majors) > 1:
+        return ", ".join(ordered)
+    major = majors.pop()
+    same_major = [version_key(v) for v in all_versions if version_key(v)[:1] == major]
     low, high = version_key(ordered[0]), version_key(ordered[-1])
-    between = [v for v in all_versions if low <= version_key(v) <= high]
-    return f"{ordered[0]}-{ordered[-1]}" if sorted(between) == sorted(ordered) else ", ".join(ordered)
+    if sorted(k for k in same_major if low <= k <= high) != sorted(version_key(v) for v in ordered):
+        return ", ".join(ordered)
+    open_low, open_high = low == min(same_major), high == max(same_major)
+    if open_low and open_high:
+        return f"{major[0]}.x"
+    if open_low:
+        return f"{ordered[-1]} or earlier"
+    if open_high:
+        return f"{ordered[0]} or later"
+    return ordered[0] if len(ordered) == 1 else f"{ordered[0]}-{ordered[-1]}"
 
 
 def version_table(samples):
@@ -471,13 +487,20 @@ def identify(matches):
 
 
 def version_matches(found, truth):
-    """Exact, or a range `a-b` or list `a, b` that contains the true version."""
+    """Whether a reported version or range contains the true version: `a-b`, `a, b`,
+    `a or earlier` and `a or later` within a's major version, or `17.x`."""
     if not found or not truth:
         return found == truth
+    key = version_key(truth)
     if found == truth or truth in [v.strip() for v in found.split(",")]:
         return True
+    if m := re.fullmatch(r"(\d+)\.x", found):
+        return key[:1] == (int(m.group(1)),)
+    if m := re.fullmatch(r"([\d.]+) or (earlier|later)", found):
+        bound = version_key(m.group(1))
+        return key[:1] == bound[:1] and (key <= bound if m.group(2) == "earlier" else key >= bound)
     m = re.fullmatch(r"([\d.]+)-([\d.]+)", found)
-    return bool(m) and version_key(m.group(1)) <= version_key(truth) <= version_key(m.group(2))
+    return bool(m) and version_key(m.group(1)) <= key <= version_key(m.group(2))
 
 
 def judge(results, signature_product):

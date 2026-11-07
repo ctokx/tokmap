@@ -102,20 +102,31 @@ class DraftTests(unittest.TestCase):
         samples = [("16.4", self.pg_error(2145)), ("16.6", self.pg_error(2145)), ("15.10", self.pg_error(2198))]
         self.assertEqual(version_table(samples), {b"L2145": {"16.4", "16.6"}, b"L2198": {"15.10"}})
 
-    def test_version_ranges_name_only_contiguous_versions(self):
-        everything = ["16.4", "16.5", "16.6", "17.0"]
+    def test_version_ranges_are_open_at_the_edge_of_what_was_recorded(self):
+        everything = ["16.3", "16.4", "16.5", "16.6", "16.7", "17.6", "17.7", "17.9"]
         self.assertEqual(version_text({"16.4", "16.5", "16.6"}, everything), "16.4-16.6")
-        self.assertEqual(version_text({"16.4", "17.0"}, everything), "16.4, 17.0")
+        self.assertEqual(version_text({"16.5"}, everything), "16.5")
+        self.assertEqual(version_text({"17.6", "17.7"}, everything), "17.7 or earlier")
+        self.assertEqual(version_text({"16.7"}, everything), "16.7 or later")
+        self.assertEqual(version_text({"17.6", "17.7", "17.9"}, everything), "17.x")
+        self.assertEqual(version_text({"16.4", "17.6"}, everything), "16.4, 17.6")
+
+    def test_reported_ranges_are_checked_within_their_major_version(self):
         self.assertTrue(version_matches("16.4-16.6", "16.5"))
         self.assertFalse(version_matches("16.4-16.6", "16.7"))
         self.assertTrue(version_matches("16.4, 17.0", "17.0"))
+        self.assertTrue(version_matches("17.9 or earlier", "17.2"))
+        self.assertFalse(version_matches("17.9 or earlier", "16.6"))
+        self.assertTrue(version_matches("18.6 or later", "18.7"))
+        self.assertTrue(version_matches("17.x", "17.4"))
+        self.assertFalse(version_matches("17.x", "18.0"))
 
     def test_table_signatures_read_the_version_and_fall_back_to_the_product(self):
         samples = [("16.4", self.pg_error(2145)), ("16.6", self.pg_error(2145)), ("15.10", self.pg_error(2198))]
         lines = table_lines(samples, [b"unrelated"], b"E")
         by_version = {version: pattern for pattern, version in lines}
-        self.assertTrue(matches(by_version["16.4-16.6"], self.pg_error(2145)))
-        self.assertIsNone(matches(by_version["16.4-16.6"], self.pg_error(2198)))
+        self.assertTrue(matches(by_version["16.x"], self.pg_error(2145)))
+        self.assertIsNone(matches(by_version["16.x"], self.pg_error(2198)))
         self.assertTrue(matches(by_version[None], self.pg_error(9999)))
 
     def test_tag_names_become_versions(self):
